@@ -1,0 +1,17 @@
+# Lista de vídeos para baixar e transcrever
+# Linhas começando com # são ignoradas (comentários)
+# Coloque uma URL por linha
+
+# 5 - Homero, o senhor do Olimpo
+https://www.youtube.com/watch?v=ZBnXdG2GzHI
+
+# 6 - Zeus entra em cena
+https://www.youtube.com/watch?v=d8XRyYpnixw
+
+# 7 - Zeus e Hera, o casal imperial
+https://www.youtube.com/watch?v=G3ghkYeqZxo
+
+# 8 - Por que Zeus trai Hera? E ela, por que atura isso?
+https://www.youtube.com/watch?v=806kcHhlRgY
+
+# Você pode adicionar quantas URLs quiser
