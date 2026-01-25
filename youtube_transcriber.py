@@ -811,10 +811,20 @@ class YouTubeTranscriberApp:
         for row in get_history():
             id_, url, titulo, status, output_file, created_at = row
             status_display = "✅ OK" if status == "sucesso" else "❌ Erro"
+            
+            # Formata a data (pode ser datetime ou string)
+            if created_at:
+                if isinstance(created_at, datetime):
+                    data_formatada = created_at.strftime('%Y-%m-%d %H:%M')
+                else:
+                    data_formatada = str(created_at)[:16]
+            else:
+                data_formatada = ""
+            
             self.history_tree.insert('', tk.END, values=(
                 titulo or url[:50],
                 status_display,
-                created_at[:16] if created_at else ""
+                data_formatada
             ), tags=(output_file,))
     
     def _clear_history(self):
