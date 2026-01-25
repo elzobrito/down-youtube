@@ -2,16 +2,25 @@
 # Linhas começando com # são ignoradas (comentários)
 # Coloque uma URL por linha
 
-# 5 - Homero, o senhor do Olimpo
-https://www.youtube.com/watch?v=ZBnXdG2GzHI
+# 9 - Hera vai à luta
+https://www.youtube.com/watch?v=TGRSpMyL0h0
 
-# 6 - Zeus entra em cena
-https://www.youtube.com/watch?v=d8XRyYpnixw
+# 10 - Posêidon, o ressentido
+https://www.youtube.com/watch?v=RnQYN_f23fI
 
-# 7 - Zeus e Hera, o casal imperial
-https://www.youtube.com/watch?v=G3ghkYeqZxo
+# 11 - Atena, a deusa dos olhos brilhantes
+https://www.youtube.com/watch?v=DuPPNUu_2J4
 
-# 8 - Por que Zeus trai Hera? E ela, por que atura isso?
-https://www.youtube.com/watch?v=806kcHhlRgY
+# 12 - O lado escuro de Atena
+https://www.youtube.com/watch?v=zdj945xvJzs
+
+#13 - Atena, a deusa da justiça
+https://www.youtube.com/watch?v=Vs6EwZfHPIo
+
+#14 - Hefesto, o deus operário
+https://www.youtube.com/watch?v=UjW0GaNODxs
+
+#15 - A poderosa Afrodite
+https://www.youtube.com/watch?v=0DXUpdYIHDE
 
 # Você pode adicionar quantas URLs quiser
