@@ -1,33 +1,77 @@
-# YouTube Transcriber
+# 🎬 YouTube Transcriber
 
-Aplicativo com interface grafica para baixar audio, transcrever com whisper.cpp e armazenar tudo no SQLite. Fila persistente, biblioteca de transcricoes, historico com reprocessamento e suporte a arquivos locais.
+Aplicativo com interface grafica para baixar audio, transcrever com **whisper.cpp** e armazenar tudo no SQLite. Inclui fila persistente, biblioteca de transcricoes, historico com reprocessamento e suporte a arquivos locais.
 
-## Recursos
+![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
 
-- Download via yt-dlp (audio ou video + extracao de audio)
-- Transcricao com whisper.cpp (modelo definido pelo usuario)
-- Fila persistente no banco (status pending/processing/done/failed)
-- Biblioteca com busca e exportacao (TXT, SRT, VTT, DOCX, PDF)
-- Historico com reprocessamento e abertura de midia
-- Suporte a arquivo local (video ou audio)
-- Modo portatil com data/ local
+## ✨ Funcionalidades
 
-## Requisitos
+- **Download otimizado** com yt-dlp (audio ou video + extracao)
+- **Transcricao automatica** via whisper.cpp (modelo definido pelo usuario)
+- **Fila persistente** no SQLite (pending/processing/done/failed)
+- **Biblioteca** com busca e exportacao (TXT, SRT, VTT, DOCX, PDF)
+- **Historico** com reprocessamento e abertura de midia
+- **Arquivo local** (video ou audio) com conversao para WAV 16k mono
+- **Modo portatil** com data/ local
 
-- Python 3.8+
-- FFmpeg
-- whisper.cpp v1.8.3 (whisper-cli)
-- yt-dlp
+## 📋 Pre-requisitos
 
-## Instalacao
+### 1. Python 3.8+
+
+Baixe em [python.org](https://www.python.org/downloads/)
+
+### 2. FFmpeg
+
+**Windows:**
+1. Baixe em [ffmpeg.org](https://ffmpeg.org/download.html) ou [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+2. Extraia para `C:\FFMPEG`
+3. Adicione `C:\FFMPEG\bin` ao PATH
+
+**Linux:**
+```bash
+sudo apt install ffmpeg
+```
+
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+### 3. whisper.cpp (v1.8.3)
+
+Clone e compile o whisper.cpp:
 
 ```bash
-git clone https://github.com/seu-usuario/down-youtube.git
-cd down-youtube
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp
+cmake -B build
+cmake --build build -j --config Release
+```
+
+Baixe um modelo:
+
+```bash
+./models/download-ggml-model.sh base
+```
+
+**CUDA (opcional):**
+
+```bash
+cmake -B build -DGGML_CUDA=1
+cmake --build build -j --config Release
+```
+
+## 🚀 Instalacao
+
+```bash
+git clone https://github.com/seu-usuario/youtube-transcriber.git
+cd youtube-transcriber
 pip install -r requirements.txt
 ```
 
-## Executar
+## ▶️ Executar
 
 ```bash
 python main.py
@@ -36,79 +80,89 @@ python main.py
 Ou:
 
 ```bash
-python down_youtube.py
+python youtube_transcriber.py
 ```
 
-## Configuracao
+## ⚙️ Configuracao
 
-Abra a aba Configuracoes e ajuste:
+Abra a aba **Configuracoes** e ajuste:
 
-- FFmpeg: caminho do executavel
-- Whisper CLI: caminho do whisper-cli
-- Modelo Whisper: arquivo .bin do modelo
-- Idioma: ex. portuguese
-- Threads: 0 = auto
-- Beam size / Best of
-- Manter audio (opcional)
-- Manter video (opcional, usa MP4)
+- **FFmpeg**: caminho do executavel
+- **Whisper CLI**: caminho do `whisper-cli`
+- **Modelo Whisper**: arquivo `.bin`
+- **Idioma**: ex. `portuguese`
+- **Threads**: 0 = auto
+- **Beam size / Best of**
+- **Manter audio** (opcional)
+- **Manter video** (opcional, usa MP4)
 
-Observacao: usar GPU requer whisper-cli compilado com CUDA. Caso contrario, o app usa CPU normalmente.
+Observacao: GPU so funciona com whisper-cli compilado com CUDA. Caso contrario, o app usa CPU normalmente.
 
-## Uso (URL)
+## 📖 Como usar
 
-1. Cole a URL na aba Download
-2. Clique em Processar
-3. A transcricao entra na Biblioteca e no Historico
+### URL (YouTube)
 
-## Uso (Arquivo local)
+1. Cole a URL na aba **Download**
+2. Clique em **Processar**
+3. A transcricao aparece na **Biblioteca** e no **Historico**
 
-1. Clique em Arquivo local na aba Download
+### Arquivo local
+
+1. Clique em **Arquivo local**
 2. Selecione um video ou audio
 3. O app converte para WAV 16k mono e transcreve
 
-## Fila persistente
+### Fila persistente
 
-- A aba Fila salva os itens no SQLite
-- Itens processados ficam como done/failed
-- Processar Fila processa apenas pending/failed
-- Use Limpar Fila para remover tudo
+- Itens da fila ficam salvos no SQLite
+- **Processar Fila** executa apenas `pending` e `failed`
+- Itens processados ficam como `done`
 
-## Banco de dados
+## 📁 Banco de dados
 
 O SQLite fica em:
 
-- Normal: %USERPROFILE%/.youtube_transcriber/youtube_transcriber.db
-- Portatil: ./data/youtube_transcriber.db (crie um arquivo portable.flag na raiz)
+- **Normal:** `%USERPROFILE%/.youtube_transcriber/youtube_transcriber.db`
+- **Portatil:** `./data/youtube_transcriber.db` (crie `portable.flag` na raiz)
 
-## Saida
+## 📦 Estrutura de saida
 
-- Arquivos .txt sao criados no diretorio de saida
-- Audio e video sao removidos por padrao, a menos que voce marque as opcoes de manter
+- `.txt` da transcricao no diretorio de saida
+- Audio e video sao removidos por padrao, a menos que voce marque as opcoes
 
-## Solucao de problemas
+## 🔧 Solucao de problemas
 
 ### Erro: unknown argument
 
-Sua versao do whisper-cli pode nao aceitar certas flags. Ajuste Beam size / Best of nas Configuracoes.
+Sua versao do `whisper-cli` pode nao aceitar certas flags.
+Exemplo: use `-bs/--beam-size` em vez de `-b`.
 
-### Whisper-cli nao encontrado
+### whisper-cli nao encontrado
 
-Verifique o caminho em Configuracoes ou adicione ao PATH.
+Configure o caminho correto na aba **Configuracoes** ou adicione ao PATH.
 
-### FFmpeg nao encontrado
+### ffmpeg nao encontrado
 
 Instale o FFmpeg e configure o caminho no app.
 
 ### GPU nao funciona
 
-O whisper.cpp precisa ser compilado com CUDA (GGML_CUDA=1). Se nao estiver, o app roda em CPU.
+O whisper.cpp precisa ser compilado com CUDA (`GGML_CUDA=1`). Sem isso, o app roda em CPU.
 
-## Licenca
+## 🤝 Contribuindo
+
+1. Fork do projeto
+2. Crie uma branch (`git checkout -b feature/nova-funcionalidade`)
+3. Commit (`git commit -m 'Adiciona nova funcionalidade'`)
+4. Push (`git push origin feature/nova-funcionalidade`)
+5. Abra um Pull Request
+
+## 📄 Licenca
 
 MIT
 
-## Creditos
+## 🙏 Agradecimentos
 
-- yt-dlp
-- whisper.cpp
-- FFmpeg
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+- [FFmpeg](https://ffmpeg.org/)
