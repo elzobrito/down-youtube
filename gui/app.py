@@ -11,6 +11,7 @@ import time
 import tempfile
 import wave
 import urllib.parse
+import hashlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +27,8 @@ from database import (
     update_video_media,
     save_transcription,
     add_history,
+    get_latest_transcription_for_source,
+    get_transcription_by_audio_hash,
 )
 
 from gui.tabs.download_tab import DownloadTab
@@ -38,11 +41,19 @@ from gui.tabs.library_tab import LibraryTab
 class TranscriberWorker:
     _cli_help_cache = {}
 
-    def __init__(self, log_callback, progress_callback, complete_callback, queue_status_callback=None):
+    def __init__(
+        self,
+        log_callback,
+        progress_callback,
+        complete_callback,
+        queue_status_callback=None,
+        confirm_callback=None,
+    ):
         self.log = log_callback
         self.progress = progress_callback
         self.complete = complete_callback
         self.queue_status = queue_status_callback
+        self.confirm = confirm_callback
         self.running = False
         self.cancel_requested = False
         self.last_error = None
@@ -433,7 +444,23 @@ class TranscriberWorker:
 
     def processar_url(self, url):
         if self.cancel_requested:
-            return False
+            return "failed"
+
+        existing_url = get_latest_transcription_for_source(url=url)
+        if existing_url:
+            if not self._confirm_duplicate(
+                "Transcricao existente",
+                "Ja existe transcricao para esta URL. Reprocessar?",
+            ):
+                self.log("⏭️ Transcricao existente para URL. Ignorado.")
+                video_db_id = add_video(url)
+                add_history(
+                    video_db_id,
+                    "skipped_duplicate",
+                    error_message="duplicado_url",
+                    processing_time_seconds=0,
+                )
+                return "skipped"
 
         output_dir_setting = get_setting("output_dir")
         if output_dir_setting is None:
@@ -468,7 +495,7 @@ class TranscriberWorker:
                     processing_time_seconds=elapsed,
                 )
                 self.log("❌ Falha no download")
-                return False
+                return "failed"
             arquivo_wav = self.extrair_audio(video_path, diretorio)
         else:
             arquivo_wav, info = self.baixar_audio(url, diretorio)
@@ -498,7 +525,7 @@ class TranscriberWorker:
                 processing_time_seconds=elapsed,
             )
             self.log("❌ Falha no download")
-            return False
+            return "failed"
 
         self.log(f"✅ Download: {info.get('title') if info else 'audio'}")
 
@@ -516,6 +543,46 @@ class TranscriberWorker:
 
         if not manter_audio:
             update_video_media(video_db_id, audio_path=None, video_path=video_path if manter_video else None)
+
+        if not existing_url:
+            existing_video = get_latest_transcription_for_source(video_id=(info or {}).get("id"))
+            if existing_video:
+                if not self._confirm_duplicate(
+                    "Transcricao existente",
+                    "Ja existe transcricao para este video. Reprocessar?",
+                ):
+                    self.log("⏭️ Transcricao existente para video. Ignorado.")
+                    add_history(
+                        video_db_id,
+                        "skipped_duplicate",
+                        error_message="duplicado_video",
+                        audio_path=arquivo_wav if manter_audio else None,
+                        video_path=video_path if manter_video else None,
+                        processing_time_seconds=time.perf_counter() - start_time,
+                    )
+                    if not manter_audio and arquivo_wav and os.path.exists(arquivo_wav):
+                        os.remove(arquivo_wav)
+                    return "skipped"
+
+        audio_hash = self._hash_file(arquivo_wav)
+        existing_hash = get_transcription_by_audio_hash(audio_hash)
+        if existing_hash:
+            if not self._confirm_duplicate(
+                "Audio ja transcrito",
+                "Este audio ja foi transcrito. Reprocessar mesmo assim?",
+            ):
+                self.log("⏭️ Audio duplicado. Ignorado.")
+                add_history(
+                    video_db_id,
+                    "skipped_duplicate",
+                    error_message="duplicado_audio",
+                    audio_path=arquivo_wav if manter_audio else None,
+                    video_path=video_path if manter_video else None,
+                    processing_time_seconds=time.perf_counter() - start_time,
+                )
+                if not manter_audio and arquivo_wav and os.path.exists(arquivo_wav):
+                    os.remove(arquivo_wav)
+                return "skipped"
 
         arquivo_txt = self.transcrever_audio(arquivo_wav, diretorio)
         elapsed = time.perf_counter() - start_time
@@ -535,6 +602,7 @@ class TranscriberWorker:
                 segments=None,
                 language=get_setting("whisper_language") or "pt",
                 model=get_setting("whisper_model") or "small",
+                audio_hash=audio_hash,
             )
             add_history(
                 video_db_id,
@@ -560,7 +628,7 @@ class TranscriberWorker:
             self.log("🗑️ Audio removido")
 
         self.progress("Concluido")
-        return arquivo_txt is not None
+        return "success" if arquivo_txt else "failed"
 
     def processar_arquivo_local(self, file_path):
         output_dir_setting = get_setting("output_dir")
@@ -589,7 +657,27 @@ class TranscriberWorker:
                 error_message=self.last_error,
                 processing_time_seconds=0,
             )
-            return False
+            return "failed"
+
+        existing_url = get_latest_transcription_for_source(url=file_path)
+        if existing_url:
+            if not self._confirm_duplicate(
+                "Transcricao existente",
+                "Ja existe transcricao para este arquivo. Reprocessar?",
+            ):
+                self.log("⏭️ Transcricao existente para arquivo local. Ignorado.")
+                video_db_id = add_video(
+                    file_path,
+                    title=Path(file_path).stem,
+                    source_site="local",
+                )
+                add_history(
+                    video_db_id,
+                    "skipped_duplicate",
+                    error_message="duplicado_local",
+                    processing_time_seconds=0,
+                )
+                return "skipped"
 
         self.log(f"\n{'=' * 50}")
         self.log(f"📥 Processando arquivo local: {file_path}")
@@ -624,7 +712,7 @@ class TranscriberWorker:
                 video_path=video_path,
                 processing_time_seconds=time.perf_counter() - start_time,
             )
-            return False
+            return "failed"
 
         video_db_id = add_video(
             file_path,
@@ -636,6 +724,26 @@ class TranscriberWorker:
 
         if not manter_audio:
             update_video_media(video_db_id, audio_path=None, video_path=video_path)
+
+        audio_hash = self._hash_file(audio_path)
+        existing_hash = get_transcription_by_audio_hash(audio_hash)
+        if existing_hash:
+            if not self._confirm_duplicate(
+                "Audio ja transcrito",
+                "Este audio ja foi transcrito. Reprocessar mesmo assim?",
+            ):
+                self.log("⏭️ Audio duplicado. Ignorado.")
+                add_history(
+                    video_db_id,
+                    "skipped_duplicate",
+                    error_message="duplicado_audio",
+                    audio_path=audio_path if manter_audio else None,
+                    video_path=video_path,
+                    processing_time_seconds=time.perf_counter() - start_time,
+                )
+                if not manter_audio and audio_path and os.path.exists(audio_path):
+                    os.remove(audio_path)
+                return "skipped"
 
         arquivo_txt = self.transcrever_audio(audio_path, diretorio)
         elapsed = time.perf_counter() - start_time
@@ -655,6 +763,7 @@ class TranscriberWorker:
                 segments=None,
                 language=get_setting("whisper_language") or "pt",
                 model=get_setting("whisper_model") or "small",
+                audio_hash=audio_hash,
             )
             add_history(
                 video_db_id,
@@ -680,7 +789,7 @@ class TranscriberWorker:
             self.log("🗑️ Audio removido")
 
         self.progress("Concluido")
-        return arquivo_txt is not None
+        return "success" if arquivo_txt else "failed"
 
     def processar_lista(self, urls):
         self.running = True
@@ -689,6 +798,7 @@ class TranscriberWorker:
         total = len(urls)
         sucesso = 0
         falha = 0
+        pulado = 0
 
         for i, item in enumerate(urls, 1):
             if self.cancel_requested:
@@ -715,23 +825,32 @@ class TranscriberWorker:
             else:
                 success = self.processar_url(url_str)
 
-            if success:
+            if success == "success":
                 sucesso += 1
                 if queue_id is not None and self.queue_status:
                     self.queue_status(queue_id, "done")
+            elif success == "skipped":
+                pulado += 1
+                if queue_id is not None and self.queue_status:
+                    self.queue_status(queue_id, "skipped")
             else:
                 falha += 1
                 if queue_id is not None and self.queue_status:
                     self.queue_status(queue_id, "failed")
 
         self.log(f"\n{'=' * 50}")
-        self.log(f"📊 RESUMO: ✅ {sucesso} sucesso | ❌ {falha} falha")
+        self.log(f"📊 RESUMO: ✅ {sucesso} sucesso | ❌ {falha} falha | ⏭️ {pulado} pulado")
 
         self.running = False
         self.complete()
 
     def cancelar(self):
         self.cancel_requested = True
+
+    def _confirm_duplicate(self, title, message):
+        if not self.confirm:
+            return False
+        return self.confirm(title, message)
 
     def _parse_local_path(self, value, item_type=None):
         candidate = value
@@ -759,6 +878,17 @@ class TranscriberWorker:
         if path.startswith("/") and len(path) > 2 and path[2] == ":":
             path = path[1:]
         return path
+
+    @staticmethod
+    def _hash_file(path, chunk_size=1024 * 1024):
+        hasher = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
     @staticmethod
     def _parse_percent(value):
@@ -956,6 +1086,7 @@ class YouTubeTranscriberApp:
             self._update_progress,
             self._on_complete,
             None,
+            self._confirm_action,
         )
 
         thread = threading.Thread(
@@ -978,6 +1109,7 @@ class YouTubeTranscriberApp:
             self._update_progress,
             self._on_complete,
             None,
+            self._confirm_action,
         )
 
         thread = threading.Thread(
@@ -1000,6 +1132,7 @@ class YouTubeTranscriberApp:
             self._update_progress,
             self._on_complete,
             self._update_queue_status,
+            self._confirm_action,
         )
 
         thread = threading.Thread(
@@ -1041,6 +1174,18 @@ class YouTubeTranscriberApp:
 
     def _update_queue_status(self, queue_id, status):
         self.root.after(0, lambda: self.queue_tab.update_status(queue_id, status))
+
+    def _confirm_action(self, title, message):
+        result = {"value": False}
+        done = threading.Event()
+
+        def ask():
+            result["value"] = messagebox.askyesno(title, message)
+            done.set()
+
+        self.root.after(0, ask)
+        done.wait()
+        return result["value"]
 
     def _on_complete(self):
         def apply_complete():

@@ -96,7 +96,12 @@ class HistoryTab(ttk.Frame):
             audio_path = row[5]
             video_path = row[6]
             created_at = row[7]
-            status_display = "OK" if status == "sucesso" else "Erro"
+            if status == "sucesso":
+                status_display = "OK"
+            elif status and status.startswith("skipped"):
+                status_display = "Pulado"
+            else:
+                status_display = "Erro"
             data_formatada = format_datetime_local(created_at)
             self.history_tree.insert(
                 "",

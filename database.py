@@ -121,12 +121,15 @@ def init_database():
             word_count INTEGER,
             duration_seconds REAL,
             model_used TEXT,
+            audio_hash TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP,
             FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
         )
         """
     )
+
+    _ensure_column(cursor, "transcriptions", "audio_hash", "TEXT")
 
     cursor.execute(
         """
@@ -303,7 +306,14 @@ def update_video_media(video_id, audio_path=None, video_path=None):
     conn.close()
 
 
-def save_transcription(video_id, text, segments=None, language="pt", model="small"):
+def save_transcription(
+    video_id,
+    text,
+    segments=None,
+    language="pt",
+    model="small",
+    audio_hash=None,
+):
     conn = _connect()
     cursor = conn.cursor()
 
@@ -316,10 +326,10 @@ def save_transcription(video_id, text, segments=None, language="pt", model="smal
     cursor.execute(
         """
         INSERT INTO transcriptions
-        (video_id, language, full_text, segments_json, word_count, duration_seconds, model_used)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (video_id, language, full_text, segments_json, word_count, duration_seconds, model_used, audio_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (video_id, language, text, segments_json, word_count, duration, model),
+        (video_id, language, text, segments_json, word_count, duration, model, audio_hash),
     )
 
     transcription_id = cursor.lastrowid
@@ -375,6 +385,61 @@ def get_transcription_by_video(video_id):
         LIMIT 1
         """,
         (video_id,),
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+
+def get_latest_transcription_for_source(video_id=None, url=None):
+    conn = _connect()
+    cursor = conn.cursor()
+
+    if video_id:
+        cursor.execute(
+            """
+            SELECT t.id, t.created_at
+            FROM transcriptions t
+            JOIN videos v ON t.video_id = v.id
+            WHERE v.video_id = ?
+            ORDER BY t.created_at DESC
+            LIMIT 1
+            """,
+            (video_id,),
+        )
+    elif url:
+        cursor.execute(
+            """
+            SELECT t.id, t.created_at
+            FROM transcriptions t
+            JOIN videos v ON t.video_id = v.id
+            WHERE v.url = ?
+            ORDER BY t.created_at DESC
+            LIMIT 1
+            """,
+            (url,),
+        )
+    else:
+        conn.close()
+        return None
+
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+
+def get_transcription_by_audio_hash(audio_hash):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, created_at
+        FROM transcriptions
+        WHERE audio_hash = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (audio_hash,),
     )
     result = cursor.fetchone()
     conn.close()
