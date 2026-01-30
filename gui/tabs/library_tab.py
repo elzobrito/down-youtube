@@ -13,6 +13,7 @@ from database import (
     delete_transcription,
     get_transcription_stats,
 )
+from gui.tabs.chat_tab import ChatWindow
 
 
 class LibraryTab(ttk.Frame):
@@ -54,20 +55,18 @@ class LibraryTab(ttk.Frame):
         list_frame = ttk.Frame(paned)
         paned.add(list_frame, weight=1)
 
-        columns = ("titulo", "canal", "palavras", "duracao", "data")
+        columns = ("titulo", "canal", "palavras", "data")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
 
         self.tree.heading("titulo", text="Titulo")
         self.tree.heading("canal", text="Canal")
         self.tree.heading("palavras", text="Palavras")
-        self.tree.heading("duracao", text="Duracao")
-        self.tree.heading("data", text="Data")
+        self.tree.heading("data", text="Data/Hora")
 
         self.tree.column("titulo", width=250)
         self.tree.column("canal", width=120)
         self.tree.column("palavras", width=80)
-        self.tree.column("duracao", width=80)
-        self.tree.column("data", width=100)
+        self.tree.column("data", width=120)
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -123,6 +122,9 @@ class LibraryTab(ttk.Frame):
         ttk.Button(action_frame, text="Enviar para Drive", command=self._upload_to_drive).pack(
             side=tk.LEFT, padx=2
         )
+        ttk.Button(action_frame, text="Chat IA", command=self._open_chat).pack(
+            side=tk.LEFT, padx=2
+        )
 
         ttk.Button(action_frame, text="Traduzir", command=self._translate_selected).pack(
             side=tk.RIGHT, padx=2
@@ -139,17 +141,10 @@ class LibraryTab(ttk.Frame):
             id_, title, channel, lang, words, duration, created = t
             if lang_filter != "Todos" and lang != lang_filter:
                 continue
-            if duration:
-                mins = int(duration // 60)
-                secs = int(duration % 60)
-                duration_str = f"{mins}:{secs:02d}"
-            else:
-                duration_str = "-"
-
             if isinstance(created, datetime):
-                date_str = created.strftime("%d/%m/%Y")
+                date_str = created.strftime("%d/%m/%Y %H:%M")
             else:
-                date_str = str(created)[:10]
+                date_str = str(created)[:16]
 
             self.tree.insert(
                 "",
@@ -159,7 +154,6 @@ class LibraryTab(ttk.Frame):
                     (title or "Sem titulo")[:50],
                     (channel or "-")[:20],
                     f"{words:,}" if words else "-",
-                    duration_str,
                     date_str,
                 ),
             )
@@ -223,8 +217,7 @@ class LibraryTab(ttk.Frame):
                     (title or "Sem titulo")[:50],
                     (channel or "-")[:20],
                     f"{words:,}" if words else "-",
-                    "-",
-                    str(created)[:10] if created else "-",
+                    str(created)[:16] if created else "-",
                 ),
             )
 
@@ -329,6 +322,16 @@ class LibraryTab(ttk.Frame):
 
     def _translate_selected(self):
         messagebox.showinfo("Info", "Traducao sera adicionada.")
+
+    def _open_chat(self):
+        transcription = self._get_selected_transcription()
+        if not transcription:
+            messagebox.showwarning("Aviso", "Selecione uma transcricao para iniciar o chat.")
+            return
+        
+        # Check if window already open for this transcription? 
+        # For now, just open new one
+        ChatWindow(self, self.app, transcription)
 
     def _get_selected_transcription(self):
         selection = self.tree.selection()

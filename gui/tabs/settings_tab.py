@@ -170,6 +170,13 @@ class SettingsTab(ttk.Frame):
             variable=self.keep_video_var,
         ).pack(anchor=tk.W, pady=(5, 0))
 
+        self.notifications_var = tk.BooleanVar(value=get_setting("notifications_enabled") == "1")
+        ttk.Checkbutton(
+            options_frame,
+            text="Ativar notificacoes de desktop",
+            variable=self.notifications_var,
+        ).pack(anchor=tk.W, pady=(5, 0))
+
         ttk.Label(options_frame, text="Tema:").pack(anchor=tk.W, pady=(10, 0))
         self.theme_var = tk.StringVar(value=get_setting("theme"))
         theme_combo = ttk.Combobox(
@@ -181,6 +188,21 @@ class SettingsTab(ttk.Frame):
         )
         theme_combo.pack(anchor=tk.W, pady=5)
         theme_combo.bind("<<ComboboxSelected>>", self._change_theme)
+
+        ollama_frame = ttk.LabelFrame(scrollable_frame, text="Integracao Ollama (Chat)", padding=15)
+        ollama_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(ollama_frame, text="URL Servidor:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.ollama_url_var = tk.StringVar(value=get_setting("ollama_url"))
+        ttk.Entry(ollama_frame, textvariable=self.ollama_url_var, width=40).grid(
+            row=0, column=1, sticky=tk.W, padx=5, pady=5
+        )
+
+        ttk.Label(ollama_frame, text="Modelo:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.ollama_model_var = tk.StringVar(value=get_setting("ollama_model"))
+        ttk.Entry(ollama_frame, textvariable=self.ollama_model_var, width=20).grid(
+            row=1, column=1, sticky=tk.W, padx=5, pady=5
+        )
 
         backup_frame = ttk.LabelFrame(scrollable_frame, text="Backup", padding=15)
         backup_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -236,6 +258,9 @@ class SettingsTab(ttk.Frame):
         set_setting("whisper_best_of", self.best_of_var.get().strip() or "1")
         set_setting("whisper_use_gpu", "1" if self.use_gpu_var.get() else "0")
         set_setting("theme", self.theme_var.get())
+        set_setting("notifications_enabled", "1" if self.notifications_var.get() else "0")
+        set_setting("ollama_url", self.ollama_url_var.get())
+        set_setting("ollama_model", self.ollama_model_var.get())
 
         messagebox.showinfo("Sucesso", "Configuracoes salvas!")
 

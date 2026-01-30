@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from config import Config
+from config import Config, DEFAULT_SETTINGS
 
 
 def adapt_datetime(value):
@@ -18,20 +18,6 @@ sqlite3.register_adapter(datetime, adapt_datetime)
 sqlite3.register_converter("TIMESTAMP", convert_datetime)
 
 
-DEFAULT_SETTINGS = {
-    "ffmpeg_path": r"C:\FFMPEG\bin\ffmpeg.exe",
-    "whisper_cli": "whisper-cli",
-    "whisper_model": "ggml-small.bin",
-    "whisper_language": "portuguese",
-    "output_dir": str(Path.home() / "Downloads" / "Transcricoes"),
-    "keep_audio": "0",
-    "keep_video": "0",
-    "whisper_threads": "0",
-    "whisper_beam_size": "1",
-    "whisper_best_of": "1",
-    "whisper_use_gpu": "0",
-    "theme": "clam",
-}
 
 
 def _base_storage_dir():
@@ -158,6 +144,31 @@ def init_database():
             processing_time_seconds REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (video_id) REFERENCES videos(id)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transcription_id INTEGER NOT NULL,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (transcription_id) REFERENCES transcriptions(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
         )
         """
     )
@@ -702,3 +713,59 @@ def search_history(query=None, status=None, date_from=None, date_to=None, limit=
         )
         for row in results
     ]
+
+
+def create_chat_session(transcription_id, title):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO chat_sessions (transcription_id, title) VALUES (?, ?)",
+        (transcription_id, title),
+    )
+    session_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return session_id
+
+
+def get_chat_sessions(transcription_id):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, title, created_at FROM chat_sessions WHERE transcription_id = ? ORDER BY created_at DESC",
+        (transcription_id,),
+    )
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+
+def delete_chat_session(session_id):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+
+def add_chat_message(session_id, role, content):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)",
+        (session_id, role, content),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_history(session_id):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
+        (session_id,),
+    )
+    results = cursor.fetchall()
+    conn.close()
+    return results
