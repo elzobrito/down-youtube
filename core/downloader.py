@@ -107,6 +107,7 @@ class Downloader:
 
         if cookies_path and os.path.exists(cookies_path):
             ydl_opts["cookiefile"] = str(cookies_path)
+            self._log(f"🍪 Usando arquivo de cookies: {os.path.basename(cookies_path)}")
 
         try:
             self.last_error = None

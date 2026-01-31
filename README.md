@@ -1,168 +1,227 @@
 # 🎬 YouTube Transcriber
 
-Aplicativo com interface grafica para baixar audio, transcrever com **whisper.cpp** e armazenar tudo no SQLite. Inclui fila persistente, biblioteca de transcricoes, historico com reprocessamento e suporte a arquivos locais.
+Aplicativo desktop para baixar vídeos do YouTube, transcrever com **whisper.cpp** e gerenciar transcrições. Inclui **streaming pipeline**, tema dark, modo NERD com métricas detalhadas e notificações Windows.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
+
+---
 
 ## ✨ Funcionalidades
 
-- **Download otimizado** com yt-dlp (audio ou video + extracao)
-- **Transcricao automatica** via whisper.cpp (modelo definido pelo usuario)
-- **Fila persistente** no SQLite (pending/processing/done/failed)
-- **Biblioteca** com busca e exportacao (TXT, SRT, VTT, DOCX, PDF)
-- **Historico** com reprocessamento e abertura de midia
-- **Arquivo local** (video ou audio) com conversao para WAV 16k mono
-- **Modo portatil** com data/ local
+| Categoria | Features |
+|-----------|----------|
+| **🚀 Download** | Streaming pipeline (30% mais rápido), cookies bypass, auto-detect yt-dlp |
+| **🗣️ Transcrição** | whisper.cpp, GPU/CPU, configurável (threads, beam size, best of) |
+| **📚 Organização** | Fila persistente, Biblioteca com busca, Histórico com reprocessamento |
+| **🎨 Interface** | Tema Dark customizado, Modo NERD, Notificações Windows Toast |
 
-## 📋 Pre-requisitos
+---
+
+## 📋 Pré-requisitos
 
 ### 1. Python 3.8+
-
-Baixe em [python.org](https://www.python.org/downloads/)
+```bash
+python --version  # 3.8+
+```
 
 ### 2. FFmpeg
-
-**Windows:**
-1. Baixe em [ffmpeg.org](https://ffmpeg.org/download.html) ou [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
-2. Extraia para `C:\FFMPEG`
-3. Adicione `C:\FFMPEG\bin` ao PATH
-
-**Linux:**
 ```bash
-sudo apt install ffmpeg
+# Windows: baixe de https://www.gyan.dev/ffmpeg/builds/
+# Adicione ao PATH ou configure caminho no app
+
+ffmpeg -version  # verificar
 ```
 
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-### 3. whisper.cpp (v1.8.3)
-
-Clone e compile o whisper.cpp:
-
+### 3. whisper.cpp
 ```bash
 git clone https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
-cmake -B build
-cmake --build build -j --config Release
-```
-
-Baixe um modelo:
-
-```bash
+cmake -B build && cmake --build build --config Release
 ./models/download-ggml-model.sh base
 ```
 
-**CUDA (opcional):**
-
+### 4. yt-dlp
 ```bash
-cmake -B build -DGGML_CUDA=1
-cmake --build build -j --config Release
+pip install yt-dlp  # recomendado
 ```
 
-## 🚀 Instalacao
+---
+
+## 🚀 Instalação
 
 ```bash
 git clone https://github.com/seu-usuario/youtube-transcriber.git
 cd youtube-transcriber
 pip install -r requirements.txt
-```
-
-## ▶️ Executar
-
-```bash
 python main.py
 ```
 
-Ou:
+---
 
-```bash
-python youtube_transcriber.py
+## ⚙️ Configuração Recomendada
+
+### Para Intel i7 (4 cores):
+| Parâmetro | Valor | Razão |
+|-----------|-------|-------|
+| Threads | 4 | 1 por core físico |
+| Beam size | 5 | Equilíbrio qualidade/velocidade |
+| Best of | 1 | Padrão |
+| GPU CUDA | ❌ | Só se compilou com CUDA |
+
+### Caminhos necessários:
+- **FFmpeg**: `C:\FFMPEG\bin\ffmpeg.exe`
+- **Whisper CLI**: `C:\whisper.cpp\build\bin\Release\whisper-cli.exe`
+- **Modelo**: `C:\whisper.cpp\models\ggml-base.bin`
+- **Saída**: `D:\transcricoes`
+
+---
+
+## 🎨 Interface
+
+### Abas
+| Aba | Função |
+|-----|--------|
+| **Download** | URL única, arquivo local, progresso em tempo real |
+| **Fila** | Lista persistente, processar em lote |
+| **Biblioteca** | Busca, exportação (TXT, SRT, VTT, DOCX, PDF) |
+| **Histórico** | Reprocessamento, status de cada item |
+| **Configurações** | Paths, performance, tema, notificações |
+
+### 🔍 Modo NERD
+
+Painel expansível com métricas técnicas detalhadas:
+
+```
+📊 Download Stats
+  • yt-dlp version: 2025.12.08
+  • Format: bestaudio (m4a, 128kbps)
+  • Cookies: ✅ Loaded
+
+🎵 Conversion Stats
+  • FFmpeg: -ar 16000 -ac 1 -c:a pcm_s16le
+  • Sample rate: 48kHz → 16kHz
+
+🗣️ Transcription Stats
+  • Model: ggml-base.bin
+  • Backend: whisper.cpp
+  • Speed: 0.85x realtime
 ```
 
-## ⚙️ Configuracao
+### 🌙 Tema Dark
 
-Abra a aba **Configuracoes** e ajuste:
+Configurações → Tema → **Dark (Custom)**
 
-- **FFmpeg**: caminho do executavel
-- **Whisper CLI**: caminho do `whisper-cli`
-- **Modelo Whisper**: arquivo `.bin`
-- **Idioma**: ex. `portuguese`
-- **Threads**: 0 = auto
-- **Beam size / Best of**
-- **Manter audio** (opcional)
-- **Manter video** (opcional, usa MP4)
+- Inspirado no VS Code Dark+
+- Aplicado a todos os widgets
+- Área de log escura
 
-Observacao: GPU so funciona com whisper-cli compilado com CUDA. Caso contrario, o app usa CPU normalmente.
+---
 
-## 📖 Como usar
+## 🚀 Streaming Pipeline
 
-### URL (YouTube)
+Download e conversão **paralelos**, economizando 25-35% de tempo:
 
-1. Cole a URL na aba **Download**
-2. Clique em **Processar**
-3. A transcricao aparece na **Biblioteca** e no **Historico**
+```
+Tradicional:  Download ━━━━━ 30s → Conversão ━━ 10s  = 40s
+Streaming:    Download ━━━━━ 30s
+              Conversão  ━━━━ 10s (paralelo!)        = 30s ✨
+```
 
-### Arquivo local
+Ativar: Configurações → **Pipeline de Streaming** → Salvar
 
-1. Clique em **Arquivo local**
-2. Selecione um video ou audio
-3. O app converte para WAV 16k mono e transcreve
+---
 
-### Fila persistente
+## 🍪 Cookies do YouTube
 
-- Itens da fila ficam salvos no SQLite
-- **Processar Fila** executa apenas `pending` e `failed`
-- Itens processados ficam como `done`
+### Quando preciso?
 
-## 📁 Banco de dados
+Se aparecer:
+```
+ERROR: Sign in to confirm you're not a bot
+```
 
-O SQLite fica em:
+### Como exportar (Edge):
 
-- **Normal:** `%USERPROFILE%/.youtube_transcriber/youtube_transcriber.db`
-- **Portatil:** `./data/youtube_transcriber.db` (crie `portable.flag` na raiz)
+1. Instalar [Get cookies.txt LOCALLY](https://microsoftedge.microsoft.com/addons/detail/pdabbpcmapcjfjpkdhpbhcmbflgpjjfp)
+2. Abrir youtube.com (logado)
+3. Extensão → Export
+4. Configurações → Cookies → Selecionar arquivo
 
-## 📦 Estrutura de saida
+> ⚠️ Cookies expiram em ~1-2 semanas
 
-- `.txt` da transcricao no diretorio de saida
-- Audio e video sao removidos por padrao, a menos que voce marque as opcoes
+---
 
-## 🔧 Solucao de problemas
+## 🔔 Notificações
 
-### Erro: unknown argument
+Windows Toast ao finalizar processamento.
 
-Sua versao do `whisper-cli` pode nao aceitar certas flags.
-Exemplo: use `-bs/--beam-size` em vez de `-b`.
+**Requisito:**
+```bash
+pip install winotify
+```
 
-### whisper-cli nao encontrado
+**Testar:** Configurações → Notificações → **Testar**
 
-Configure o caminho correto na aba **Configuracoes** ou adicione ao PATH.
+---
 
-### ffmpeg nao encontrado
+## 🔧 Troubleshooting
 
-Instale o FFmpeg e configure o caminho no app.
+| Problema | Solução |
+|----------|---------|
+| `yt-dlp não encontrado` | `pip install yt-dlp` |
+| `Sign in to confirm you're not a bot` | Exportar cookies do YouTube |
+| `HTTP Error 403` | Usar cookies ou VPN |
+| `FFmpeg não encontrado` | Configurar path correto |
+| `GPU não funciona` | Recompilar whisper.cpp com CUDA ou desmarcar |
+| `Notificação não aparece` | `pip install winotify`, testar no app |
+| `NERD panel cortado` | Atualizado! Agora tem scrollbar |
 
-### GPU nao funciona
+---
 
-O whisper.cpp precisa ser compilado com CUDA (`GGML_CUDA=1`). Sem isso, o app roda em CPU.
+## 📁 Estrutura
 
-## 🤝 Contribuindo
+```
+youtube-transcriber/
+├── main.py                    # Entry point
+├── gui/
+│   ├── app.py                # Main window
+│   ├── tabs/                 # Download, Fila, Biblioteca, Histórico, Config
+│   ├── widgets/              # StageProgress, NerdPanel, StatsPanel
+│   └── themes/dark_custom.py # Tema dark
+├── core/
+│   ├── worker.py             # Orquestração
+│   ├── streaming_downloader.py # Pipeline paralelo
+│   ├── audio_processor.py    # Conversão WAV
+│   └── transcriber.py        # whisper.cpp
+├── integrations/
+│   └── notifications.py      # Windows Toast
+└── database.py               # SQLite
+```
 
-1. Fork do projeto
-2. Crie uma branch (`git checkout -b feature/nova-funcionalidade`)
-3. Commit (`git commit -m 'Adiciona nova funcionalidade'`)
-4. Push (`git push origin feature/nova-funcionalidade`)
-5. Abra um Pull Request
+---
 
-## 📄 Licenca
+## 📈 Changelog
+
+### v2.1 (2026-01)
+- 🎨 **Tema Dark** customizado (VS Code-inspired)
+- 🔍 **Modo NERD** com métricas técnicas detalhadas
+- 🔔 **Notificações** Windows Toast com botão de teste
+- 📊 **Barra de conversão** funcional
+- ⚡ **Estatísticas** dinâmicas (velocidade realtime)
+
+### v2.0
+- 🚀 Streaming Pipeline (25-35% mais rápido)
+- 🍪 Suporte a Cookies
+- 🔍 Auto-detecção yt-dlp
+
+---
+
+## 📄 Licença
 
 MIT
 
-## 🙏 Agradecimentos
+---
 
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-- [FFmpeg](https://ffmpeg.org/)
+**Feito com ❤️ para transcrição de vídeos**

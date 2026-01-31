@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "notifications_enabled": "1",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3",
+    "use_streaming_pipeline": "1",  # Ativar pipeline paralelo por padrão
 }
 
 

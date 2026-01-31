@@ -17,6 +17,7 @@ from database import (
 from core.downloader import Downloader
 from core.audio import AudioProcessor
 from core.transcriber import Transcriber
+from core.streaming_downloader import StreamingDownloader
 
 
 class TranscriberWorker:
@@ -109,13 +110,25 @@ class TranscriberWorker:
             self.complete()
 
     def _notify(self, title, message, success=True):
-        if get_setting("notifications_enabled") == "1":
+        """Envia notificação Windows Toast"""
+        notifications_enabled = get_setting("notifications_enabled")
+        self.log(f"📢 Notificação: enabled={notifications_enabled}")
+        
+        if notifications_enabled == "1":
             try:
                 from integrations.notifications import notify_completion
-
-                notify_completion(title, message, success)
+                result = notify_completion(title, message, success)
+                if result == True:
+                    self.log(f"📢 Notificação enviada: {title}")
+                elif result == False:
+                    self.log("⚠️ Winotify não instalado - notificação ignorada")
+                else:
+                    self.log("⚠️ Erro ao enviar notificação (result=None)")
             except Exception as e:
-                self.log(f"⚠️ Erro ao enviar notificacao: {e}")
+                self.log(f"❌ Erro ao enviar notificacao: {e}")
+        else:
+            self.log("ℹ️ Notificações desabilitadas nas configurações")
+
 
     def processar_url(self, url):
         # 1. Check duplicates
@@ -154,28 +167,76 @@ class TranscriberWorker:
         self.progress("Iniciando download...")
         self.progress({"stage": "download", "percent": 0, "speed": "-", "eta": "-"})
 
-        # 3. Download
+        # 3. Download - Try streaming first if enabled, fallback to traditional
         arquivo_wav = None
         video_path = None
         info = None
         
-        if cfg["keep_video"]:
-            video_path, info = downloader.download_video(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
-            if not video_path:
-                return self._handle_failure(url, downloader.last_error, start_time)
-            
-            arquivo_wav = audio_processor.extract_audio(video_path, output_dir)
+        use_streaming = cfg.get("use_streaming_pipeline", False) and not cfg["keep_video"]
+        
+        # Notificar modo do pipeline
+        if use_streaming:
+            self.progress({"stage": "pipeline_mode", "mode": "streaming"})
+        elif cfg["keep_video"]:
+            self.progress({"stage": "pipeline_mode", "mode": "video"})
         else:
-            arquivo_wav, info = downloader.download_audio(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
+            self.progress({"stage": "pipeline_mode", "mode": "traditional"})
+        
+        if use_streaming:
+            # STREAMING PIPELINE: Download + conversão simultâneos
+            try:
+                self.log("🚀 Usando pipeline de streaming (download + conversão paralelos)")
+                streaming_dl = StreamingDownloader(
+                    progress_callback=self._update_progress,
+                    logger=self.log
+                )
+                arquivo_wav, info = streaming_dl.download_and_convert_streaming(
+                    url, output_dir, ffmpeg_path, cookies_path
+                )
+                
+                if not arquivo_wav:
+                    # Fallback para modo tradicional
+                    self.log("⚠️ Streaming falhou, tentando modo tradicional...")
+                    use_streaming = False
+                    
+            except Exception as e:
+                self.log(f"⚠️ Erro no streaming pipeline: {e}, usando modo tradicional")
+                use_streaming = False
+        
+        # TRADITIONAL PIPELINE: Fallback ou quando keep_video=1
+        if not use_streaming or not arquivo_wav:
+            if cfg["keep_video"]:
+                video_path, info = downloader.download_video(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
+                if not video_path:
+                    return self._handle_failure(url, downloader.last_error, start_time)
+                
+                arquivo_wav = audio_processor.extract_audio(video_path, output_dir)
+            else:
+                arquivo_wav, info = downloader.download_audio(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
 
-        if arquivo_wav and not cfg["keep_video"]:
-            # Normalize if we just downloaded audio (already extracted by yt-dlp usually, but ensuring 16k mono)
-            # Actually downloader ensures wav 16k, but normalizer double checks encoding
-            arquivo_wav = audio_processor.normalize_audio(arquivo_wav, output_dir)
+            if arquivo_wav and not cfg["keep_video"]:
+                # Normalize if we just downloaded audio (already extracted by yt-dlp usually, but ensuring 16k mono)
+                # Actually downloader ensures wav 16k, but normalizer double checks encoding
+                arquivo_wav = audio_processor.normalize_audio(arquivo_wav, output_dir)
 
         if not arquivo_wav:
              # Fallback info usage
              return self._handle_failure(url, "Falha no download/extracao", start_time, info, video_path, cfg["keep_video"])
+
+        # Atualizar NERD Panel com informações do sistema de arquivos
+        if info:
+            self.progress({
+                "stage": "nerd_download",
+                "format": info.get("format", "N/A"),
+                "codec": info.get("acodec", "N/A"),
+                "url": url[:80],
+            })
+            
+            self.progress({
+                "stage": "nerd_filesystem",
+                "output_dir": output_dir,
+                "video_id": info.get("id", "N/A"),
+            })
 
         self.log(f"✅ Download: {info.get('title') if info else 'audio'}")
         
@@ -320,6 +381,15 @@ class TranscriberWorker:
         audio_processor = AudioProcessor(logger=self.log)
         duration = audio_processor.get_wav_duration(audio_path)
         
+        # Enviar dados NERD de conversão
+        self.progress({
+            "stage": "nerd_conversion",
+            "ffmpeg_command": "-ar 16000 -ac 1 -c:a pcm_s16le",
+            "sample_rate": "48000 Hz → 16000 Hz",
+            "channels": "stereo → mono",
+            "output_bitrate": "256 kbps (16-bit PCM)"
+        })
+        
         transcriber = Transcriber(
             cli_path=cfg["whisper_cli"],
             model_path=cfg["whisper_model"],
@@ -332,13 +402,36 @@ class TranscriberWorker:
             progress_callback=self._update_progress,
             cancel_check_callback=lambda: self.cancel_requested
         )
+        
+        # Enviar dados NERD de transcrição
+        model_name = os.path.basename(cfg["whisper_model"]) if cfg["whisper_model"] else "default"
+        self.progress({
+            "stage": "nerd_transcription",
+            "model": model_name,
+            "backend": "whisper.cpp",
+            "language_prob": f"{cfg['whisper_language']}",
+            "speed": "calculating..."
+        })
 
         arquivo_txt = transcriber.transcribe(audio_path, output_dir, duration=duration)
         elapsed = time.perf_counter() - start_time
+        
+        # Atualizar NERD com velocidade real
+        if duration and duration > 0:
+            speed = duration / elapsed if elapsed > 0 else 0
+            self.progress({
+                "stage": "nerd_transcription",
+                "model": model_name,
+                "backend": "whisper.cpp",
+                "language_prob": f"{cfg['whisper_language']}",
+                "speed": f"{speed:.2f}x realtime",
+                "processing_time": f"{elapsed:.1f}s"
+            })
 
         if arquivo_txt:
             self.log(f"✅ Transcricao salva: {arquivo_txt}")
             text = ""
+
             try:
                 with open(arquivo_txt, "r", encoding="utf-8", errors="replace") as f:
                     text = f.read()
@@ -403,10 +496,22 @@ class TranscriberWorker:
         else:
             output_dir = str(output_dir)
 
-        # Check for cookies.txt in current working directory
-        cookies_path = Path.cwd() / "cookies.txt"
-        if not cookies_path.exists():
-            cookies_path = None
+        # Get cookies path from settings (configured by user)
+        cookies_path_setting = get_setting("cookies_path")
+        cookies_path = None
+        
+        if cookies_path_setting:
+            cookies_file = Path(cookies_path_setting)
+            if cookies_file.exists():
+                cookies_path = cookies_file
+            else:
+                self.log(f"⚠️ Arquivo de cookies não encontrado: {cookies_path_setting}")
+        
+        # Fallback: Check for cookies.txt in current working directory
+        if not cookies_path:
+            fallback_cookies = Path.cwd() / "cookies.txt"
+            if fallback_cookies.exists():
+                cookies_path = fallback_cookies
 
         return {
             "ffmpeg_path": get_setting("ffmpeg_path"),
@@ -420,6 +525,7 @@ class TranscriberWorker:
             "whisper_beam_size": self._get_int_setting("whisper_beam_size", 1),
             "whisper_best_of": self._get_int_setting("whisper_best_of", 1),
             "whisper_use_gpu": get_setting("whisper_use_gpu") == "1",
+            "use_streaming_pipeline": get_setting("use_streaming_pipeline") == "1",
             "cookies_path": str(cookies_path) if cookies_path else None,
         }
 

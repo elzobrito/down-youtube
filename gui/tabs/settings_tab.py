@@ -33,15 +33,27 @@ class SettingsTab(ttk.Frame):
         ttk.Entry(paths_frame, textvariable=self.ffmpeg_var, width=50).grid(
             row=0, column=1, padx=5, pady=5
         )
+        
+        # Frame for FFmpeg buttons
+        ffmpeg_buttons = ttk.Frame(paths_frame)
+        ffmpeg_buttons.grid(row=0, column=2, pady=5)
+        
         ttk.Button(
-            paths_frame,
+            ffmpeg_buttons,
             text="Arquivo...",
-            width=12,
+            width=10,
             command=lambda: self._browse_file(
                 self.ffmpeg_var,
                 [("Executavel", "*.exe"), ("Todos", "*.*")],
             ),
-        ).grid(row=0, column=2, pady=5)
+        ).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Button(
+            ffmpeg_buttons,
+            text="🧪 Testar",
+            width=10,
+            command=self._test_ffmpeg,
+        ).pack(side=tk.LEFT, padx=2)
 
         ttk.Label(paths_frame, text="Whisper CLI:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.whisper_cli_var = tk.StringVar(value=get_setting("whisper_cli"))
@@ -84,6 +96,21 @@ class SettingsTab(ttk.Frame):
             width=10,
             command=self._browse_output_dir,
         ).grid(row=3, column=2, pady=5)
+
+        ttk.Label(paths_frame, text="Cookies (opcional):").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.cookies_var = tk.StringVar(value=get_setting("cookies_path") or "")
+        ttk.Entry(paths_frame, textvariable=self.cookies_var, width=50).grid(
+            row=4, column=1, padx=5, pady=5
+        )
+        ttk.Button(
+            paths_frame,
+            text="Arquivo...",
+            width=12,
+            command=lambda: self._browse_file(
+                self.cookies_var,
+                [("Cookies", "*.txt"), ("Todos", "*.*")],
+            ),
+        ).grid(row=4, column=2, pady=5)
 
         transcription_frame = ttk.LabelFrame(
             scrollable_frame,
@@ -170,19 +197,42 @@ class SettingsTab(ttk.Frame):
             variable=self.keep_video_var,
         ).pack(anchor=tk.W, pady=(5, 0))
 
+        # Notificações com botão de teste
+        notification_frame = ttk.Frame(options_frame)
+        notification_frame.pack(anchor=tk.W, pady=(5, 0), fill=tk.X)
+
         self.notifications_var = tk.BooleanVar(value=get_setting("notifications_enabled") == "1")
         ttk.Checkbutton(
-            options_frame,
+            notification_frame,
             text="Ativar notificacoes de desktop",
             variable=self.notifications_var,
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            notification_frame,
+            text="Testar",
+            width=8,
+            command=self._test_notification,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        self.streaming_var = tk.BooleanVar(value=get_setting("use_streaming_pipeline") == "1")
+        ttk.Checkbutton(
+            options_frame,
+            text="Pipeline de Streaming (download + conversão paralelos - mais rápido)",
+            variable=self.streaming_var,
         ).pack(anchor=tk.W, pady=(5, 0))
 
         ttk.Label(options_frame, text="Tema:").pack(anchor=tk.W, pady=(10, 0))
         self.theme_var = tk.StringVar(value=get_setting("theme"))
+        
+        # Lista temas nativos + custom dark
+        native_themes = list(self.style.theme_names())
+        all_themes = ["Dark (Custom)"] + native_themes
+        
         theme_combo = ttk.Combobox(
             options_frame,
             textvariable=self.theme_var,
-            values=self.style.theme_names(),
+            values=all_themes,
             state="readonly",
             width=20,
         )
@@ -243,13 +293,101 @@ class SettingsTab(ttk.Frame):
 
     def _change_theme(self, event=None):
         theme = self.theme_var.get()
-        self.style.theme_use(theme)
+        
+        if theme == "Dark (Custom)":
+            # Aplicar tema dark customizado
+            try:
+                from gui.themes.dark_custom import apply_dark_theme
+                
+                # Aplicar tema dark
+                text_colors = apply_dark_theme(self.app.root, self.style)
+                
+                # Aplicar cores aos widgets Text existentes
+                self._apply_text_colors_to_app(text_colors)
+                
+            except Exception as e:
+                self.app.root.title(f"YouTube Transcriber - Erro ao aplicar tema: {e}")
+                # Fallback para tema claro
+                self.style.theme_use('vista')
+        else:
+            # Tema tkinter nativo
+            try:
+                self.style.theme_use(theme)
+                # Resetar Text widgets para cores padrão se voltar de dark
+                self._reset_text_colors()
+            except Exception as e:
+                self.app.root.title(f"YouTube Transcriber - Erro: {e}")
+                self.style.theme_use('vista')
+    
+    def _apply_text_colors_to_app(self, colors):
+        """Aplica cores aos widgets Text (não-ttk) recursivamente"""
+        import tkinter as tk
+        
+        def find_text_widgets(parent):
+            text_widgets = []
+            try:
+                for child in parent.winfo_children():
+                    if isinstance(child, tk.Text):
+                        text_widgets.append(child)
+                    # Recursão nos filhos
+                    text_widgets.extend(find_text_widgets(child))
+            except:
+                pass
+            return text_widgets
+        
+        # Encontrar e atualizar todos os Text widgets
+        for widget in find_text_widgets(self.app.root):
+            try:
+                widget.configure(
+                    bg=colors['bg'],
+                    fg=colors['fg'],
+                    insertbackground=colors['insertbackground'],
+                    selectbackground=colors['selectbackground'],
+                    selectforeground=colors['selectforeground'],
+                    highlightbackground=colors.get('highlightbackground', colors['bg']),
+                    highlightcolor=colors.get('highlightcolor', colors['fg']),
+                    highlightthickness=colors.get('highlightthickness', 1)
+                )
+            except Exception as e:
+                pass  # Ignorar erros em widgets específicos
+    
+    def _reset_text_colors(self):
+        """Reseta Text widgets para cores padrão (tema claro)"""
+        import tkinter as tk
+        
+        def find_text_widgets(parent):
+            text_widgets = []
+            try:
+                for child in parent.winfo_children():
+                    if isinstance(child, tk.Text):
+                        text_widgets.append(child)
+                    text_widgets.extend(find_text_widgets(child))
+            except:
+                pass
+            return text_widgets
+        
+        # Resetar cores para padrão claro
+        for widget in find_text_widgets(self.app.root):
+            try:
+                widget.configure(
+                    bg='#ffffff',
+                    fg='#000000',
+                    insertbackground='#000000',
+                    selectbackground='#0078d7',
+                    selectforeground='#ffffff',
+                    highlightbackground='#d0d0d0',
+                    highlightcolor='#0078d7',
+                    highlightthickness=1
+                )
+            except:
+                pass
 
     def _save_settings(self):
         set_setting("ffmpeg_path", self.ffmpeg_var.get())
         set_setting("whisper_cli", self.whisper_cli_var.get())
         set_setting("whisper_model", self.whisper_model_var.get())
         set_setting("output_dir", self.output_dir_var.get())
+        set_setting("cookies_path", self.cookies_var.get())
         set_setting("whisper_language", self.language_var.get())
         set_setting("keep_audio", "1" if self.keep_audio_var.get() else "0")
         set_setting("keep_video", "1" if self.keep_video_var.get() else "0")
@@ -259,10 +397,104 @@ class SettingsTab(ttk.Frame):
         set_setting("whisper_use_gpu", "1" if self.use_gpu_var.get() else "0")
         set_setting("theme", self.theme_var.get())
         set_setting("notifications_enabled", "1" if self.notifications_var.get() else "0")
+        set_setting("use_streaming_pipeline", "1" if self.streaming_var.get() else "0")
         set_setting("ollama_url", self.ollama_url_var.get())
         set_setting("ollama_model", self.ollama_model_var.get())
 
         messagebox.showinfo("Sucesso", "Configuracoes salvas!")
+    
+    def _test_notification(self):
+        """Testar se notificações estão funcionando"""
+        from integrations.notifications import notify_completion
+        
+        result = notify_completion(
+            "YouTube Transcriber",
+            "Notificações estão funcionando! ✅",
+            success=True
+        )
+        
+        if result == False:
+            messagebox.showwarning(
+                "Winotify não instalado",
+                "Instale winotify para usar notificações:\n\n"
+                "pip install winotify\n\n"
+                "Reinicie o app após instalação."
+            )
+        elif result is None:
+            messagebox.showerror(
+                "Erro",
+                "Erro ao enviar notificação.\n"
+                "Verifique logs para detalhes."
+            )
+        else:
+            # Sucesso - mostrar confirmação
+            messagebox.showinfo(
+                "Sucesso",
+                "Notificação Windows Toast enviada!\n\n"
+                "Verifique a área de notificações do Windows\n"
+                "(canto inferior direito da tela)."
+            )
+    
+    def _test_ffmpeg(self):
+        """Testar se o FFmpeg está instalado e funcionando"""
+        import subprocess
+        from pathlib import Path
+        
+        path = self.ffmpeg_var.get().strip()
+        
+        if not path:
+            messagebox.showwarning("Aviso", "Por favor, configure o caminho do FFmpeg primeiro.")
+            return
+        
+        # Verificar se arquivo existe
+        ffmpeg_path = Path(path)
+        if not ffmpeg_path.exists():
+            messagebox.showerror(
+                "Erro", 
+                f"Arquivo não encontrado:\n\n{path}\n\n"
+                "💡 Use o botão 'Arquivo...' para selecionar o executável correto."
+            )
+            return
+        
+        # Tentar executar FFmpeg -version
+        try:
+            result = subprocess.run(
+                [path, "-version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding='utf-8',
+                errors='replace'
+            )
+            
+            if result.returncode == 0:
+                # Extrair versão
+                first_line = result.stdout.split('\n')[0] if result.stdout else "Versão desconhecida"
+                
+                messagebox.showinfo(
+                    "✅ FFmpeg Funcionando!", 
+                    f"FFmpeg encontrado e testado com sucesso!\n\n{first_line}\n\n"
+                    "✓ O streaming pipeline deve funcionar corretamente."
+                )
+            else:
+                messagebox.showerror(
+                    "Erro", 
+                    f"FFmpeg encontrado mas retornou erro:\n\n{result.stderr[:200]}"
+                )
+        
+        except subprocess.TimeoutExpired:
+            messagebox.showerror(
+                "Erro", 
+                "FFmpeg não respondeu em 5 segundos.\n"
+                "O arquivo pode não ser um executável válido."
+            )
+        
+        except Exception as e:
+            messagebox.showerror(
+                "Erro", 
+                f"Erro ao testar FFmpeg:\n\n{type(e).__name__}: {str(e)}\n\n"
+                "💡 Verifique se o caminho aponta para ffmpeg.exe"
+            )
 
     def _backup_database(self):
         destination = filedialog.askdirectory()

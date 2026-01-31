@@ -158,25 +158,62 @@ class YouTubeTranscriberApp:
             self._log("⏳ Cancelando...")
 
     def _log(self, message):
-        self.root.after(0, lambda: self.download_tab.log(message))
+        self.root.after(0, lambda: self.download_tab.log_message(str(message), "info"))
 
     def _update_progress(self, message):
         def apply_update():
             if isinstance(message, dict):
                 stage = message.get("stage")
-                if stage == "download":
+                
+                if stage == "pipeline_mode":
+                    # Definir modo do pipeline
+                    mode = message.get("mode", "idle")
+                    self.download_tab.set_pipeline_mode(mode)
+                
+                elif stage == "download":
                     self.download_tab.update_download_progress(
-                        int(message.get("percent", 0)),
-                        message.get("speed", "-"),
-                        message.get("eta", "-"),
+                        percent=int(message.get("percent", 0)),
+                        speed=message.get("speed", "-"),
+                        eta=message.get("eta", "-"),
+                        downloaded=message.get("downloaded_mb", 0),
+                        total=message.get("total_mb", 0),
                     )
+                
+                elif stage == "conversion":
+                    self.download_tab.update_conversion_progress(
+                        percent=int(message.get("percent", 0)),
+                        format_info=message.get("format", "PCM 16kHz Mono"),
+                        speed=message.get("speed", "1.0"),
+                        size=message.get("size_mb", 0),
+                    )
+                
                 elif stage == "transcription":
                     self.download_tab.update_transcription_progress(
-                        int(message.get("percent", 0)),
-                        message.get("elapsed", ""),
+                        percent=int(message.get("percent", 0)),
+                        elapsed=message.get("elapsed", "00:00"),
+                        model=message.get("model", ""),
+                        threads=message.get("threads", 0),
+                        words=message.get("words", 0),
                     )
+                
+                elif stage == "stats":
+                    # Atualizar estatísticas do sistema
+                    self.download_tab.update_stats(**message)
+                
+                elif stage == "nerd_download":
+                    self.download_tab.update_nerd_download(**message)
+                
+                elif stage == "nerd_conversion":
+                    self.download_tab.update_nerd_conversion(**message)
+                
+                elif stage == "nerd_transcription":
+                    self.download_tab.update_nerd_transcription(**message)
+                
+                elif stage == "nerd_filesystem":
+                    self.download_tab.update_nerd_filesystem(**message)
+                
                 elif stage == "status":
-                    self.download_tab.update_progress(message.get("message", ""))
+                    self.download_tab.log_message(message.get("message", ""), "info")
             else:
                 self.download_tab.update_progress(message)
 
