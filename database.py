@@ -116,10 +116,12 @@ def init_database():
     )
 
     _ensure_column(cursor, "transcriptions", "audio_hash", "TEXT")
+    _ensure_column(cursor, "transcriptions", "is_used", "INTEGER DEFAULT 0")
 
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS translations (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             transcription_id INTEGER NOT NULL,
             target_language TEXT NOT NULL,
@@ -484,7 +486,7 @@ def get_all_transcriptions(limit=100, offset=0):
     cursor.execute(
         """
         SELECT t.id, v.title, v.channel, t.language, t.word_count,
-               t.duration_seconds, t.created_at
+               t.duration_seconds, t.created_at, COALESCE(t.is_used, 0)
         FROM transcriptions t
         JOIN videos v ON t.video_id = v.id
         ORDER BY t.created_at DESC
@@ -769,3 +771,76 @@ def get_chat_history(session_id):
     results = cursor.fetchall()
     conn.close()
     return results
+
+
+# =============================================================================
+# TRANSCRIPTION USED FLAG
+# =============================================================================
+
+def toggle_transcription_used(transcription_id, is_used=None):
+    """
+    Toggle or set the is_used flag for a transcription.
+    
+    Args:
+        transcription_id: ID of the transcription
+        is_used: If None, toggle. If True/False, set explicitly.
+    
+    Returns:
+        New is_used value (0 or 1)
+    """
+    conn = _connect()
+    cursor = conn.cursor()
+    
+    if is_used is None:
+        # Toggle: get current value and flip
+        cursor.execute(
+            "SELECT is_used FROM transcriptions WHERE id = ?",
+            (transcription_id,)
+        )
+        row = cursor.fetchone()
+        current = row[0] if row and row[0] else 0
+        new_value = 0 if current else 1
+    else:
+        new_value = 1 if is_used else 0
+    
+    cursor.execute(
+        "UPDATE transcriptions SET is_used = ? WHERE id = ?",
+        (new_value, transcription_id)
+    )
+    conn.commit()
+    conn.close()
+    return new_value
+
+
+def get_transcription_used_status(transcription_id):
+    """Get the is_used status of a transcription."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT is_used FROM transcriptions WHERE id = ?",
+        (transcription_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row[0]) if row and row[0] else False
+
+
+def get_used_transcriptions_count():
+    """Get count of transcriptions marked as used."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE is_used = 1")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def mark_all_transcriptions_unused():
+    """Reset all transcriptions to unused."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE transcriptions SET is_used = 0")
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected

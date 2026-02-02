@@ -12,6 +12,7 @@ from database import (
     search_transcriptions,
     delete_transcription,
     get_transcription_stats,
+    toggle_transcription_used,
 )
 from gui.tabs.chat_tab import ChatWindow
 
@@ -55,18 +56,21 @@ class LibraryTab(ttk.Frame):
         list_frame = ttk.Frame(paned)
         paned.add(list_frame, weight=1)
 
-        columns = ("titulo", "canal", "palavras", "data")
+        columns = ("titulo", "canal", "palavras", "data", "usado")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
 
         self.tree.heading("titulo", text="Titulo")
         self.tree.heading("canal", text="Canal")
         self.tree.heading("palavras", text="Palavras")
         self.tree.heading("data", text="Data/Hora")
+        self.tree.heading("usado", text="Usado")
 
-        self.tree.column("titulo", width=250)
-        self.tree.column("canal", width=120)
-        self.tree.column("palavras", width=80)
-        self.tree.column("data", width=120)
+        self.tree.column("titulo", width=230)
+        self.tree.column("canal", width=110)
+        self.tree.column("palavras", width=70)
+        self.tree.column("data", width=110)
+        self.tree.column("usado", width=50, anchor="center")
+
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -106,6 +110,10 @@ class LibraryTab(ttk.Frame):
         ttk.Button(action_frame, text="Excluir", command=self._delete_selected).pack(
             side=tk.LEFT, padx=2
         )
+        ttk.Button(action_frame, text="✓ Usado", command=self._toggle_used).pack(
+            side=tk.LEFT, padx=2
+        )
+
 
         export_menu_btn = ttk.Menubutton(action_frame, text="Exportar")
         export_menu = tk.Menu(export_menu_btn, tearoff=0)
@@ -138,13 +146,15 @@ class LibraryTab(ttk.Frame):
         lang_filter = self.lang_filter.get()
 
         for t in transcriptions:
-            id_, title, channel, lang, words, duration, created = t
+            id_, title, channel, lang, words, duration, created, is_used = t
             if lang_filter != "Todos" and lang != lang_filter:
                 continue
             if isinstance(created, datetime):
                 date_str = created.strftime("%d/%m/%Y %H:%M")
             else:
                 date_str = str(created)[:16]
+            
+            used_str = "✅" if is_used else ""
 
             self.tree.insert(
                 "",
@@ -155,8 +165,10 @@ class LibraryTab(ttk.Frame):
                     (channel or "-")[:20],
                     f"{words:,}" if words else "-",
                     date_str,
+                    used_str,
                 ),
             )
+
 
         stats = get_transcription_stats()
         self.stats_label.config(
@@ -299,11 +311,30 @@ class LibraryTab(ttk.Frame):
             delete_transcription(transcription_id)
             self._load_transcriptions()
 
+    def _toggle_used(self):
+        """Toggle the 'usado' (used) flag for selected transcription"""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma transcrição primeiro.")
+            return
+        
+        transcription_id = int(selection[0])
+        new_value = toggle_transcription_used(transcription_id)
+        
+        # Atualizar a linha na treeview sem recarregar toda a lista
+        current_values = self.tree.item(selection[0], "values")
+        new_used_str = "✅" if new_value else ""
+        self.tree.item(
+            selection[0],
+            values=(current_values[0], current_values[1], current_values[2], current_values[3], new_used_str)
+        )
+
     def _open_transcription(self, event=None):
         transcription = self._get_selected_transcription()
         if not transcription:
             return
         TranscriptionViewer(self, transcription)
+
 
     def _open_audio(self):
         transcription = self._get_selected_transcription()
