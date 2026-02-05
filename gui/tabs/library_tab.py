@@ -390,6 +390,7 @@ class TranscriptionViewer(tk.Toplevel):
     def __init__(self, parent, transcription):
         super().__init__(parent)
         self.transcription = transcription
+        self.view_mode = tk.StringVar(value="text")
 
         title = (transcription.get("video_title") or "Transcricao")[:50]
         self.title(f"Transcricao - {title}")
@@ -411,6 +412,22 @@ class TranscriptionViewer(tk.Toplevel):
         ttk.Button(toolbar, text="Exportar", command=self._export).pack(
             side=tk.LEFT, padx=2
         )
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Label(toolbar, text="Visualizacao:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Radiobutton(
+            toolbar,
+            text="Transcricao",
+            variable=self.view_mode,
+            value="text",
+            command=self._load_content,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(
+            toolbar,
+            text="Legenda",
+            variable=self.view_mode,
+            value="subtitle",
+            command=self._load_content,
+        ).pack(side=tk.LEFT, padx=2)
 
         self.text = scrolledtext.ScrolledText(self, font=("Consolas", 11), wrap=tk.WORD)
         self.text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -422,15 +439,54 @@ class TranscriptionViewer(tk.Toplevel):
 
     def _load_content(self):
         self.text.delete(1.0, tk.END)
-        self.text.insert(tk.END, self.transcription.get("full_text") or "")
+        mode = self.view_mode.get()
+        if mode == "subtitle":
+            self.text.insert(tk.END, self._build_subtitle_content())
+        else:
+            self.text.insert(tk.END, self.transcription.get("full_text") or "")
 
+        mode_label = "Legenda" if mode == "subtitle" else "Transcricao"
+        has_segments = "com segmentos" if self.transcription.get("segments") else "sem segmentos"
         self.status.config(
             text=(
                 f"Palavras: {self.transcription.get('word_count', 0):,} | "
                 f"Modelo: {self.transcription.get('model', '')} | "
-                f"Idioma: {self.transcription.get('language', '')}"
+                f"Idioma: {self.transcription.get('language', '')} | "
+                f"Modo: {mode_label} ({has_segments})"
             )
         )
+
+    def _build_subtitle_content(self):
+        segments = self.transcription.get("segments") or []
+        if not segments:
+            return (
+                "Sem segmentos de legenda nesta transcricao.\n\n"
+                "Gere uma nova transcricao para disponibilizar o modo legenda."
+            )
+
+        lines = []
+        for i, seg in enumerate(segments, 1):
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+
+            try:
+                start_seconds = float(seg.get("start", 0) or 0)
+            except (TypeError, ValueError):
+                start_seconds = 0.0
+            try:
+                end_seconds = float(seg.get("end", 0) or 0)
+            except (TypeError, ValueError):
+                end_seconds = start_seconds
+
+            start = Exporter._format_timestamp_srt(start_seconds)
+            end = Exporter._format_timestamp_srt(max(end_seconds, start_seconds))
+            lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+
+        if not lines:
+            return "Sem texto util nos segmentos de legenda."
+
+        return "\n".join(lines).strip() + "\n"
 
     def _copy_all(self):
         self.clipboard_clear()
