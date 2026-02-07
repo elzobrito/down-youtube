@@ -11,6 +11,8 @@ from database import (
     delete_chat_session
 )
 from core.ollama_client import OllamaClient
+from gui.widgets.context_menu import attach_text_context_menu, attach_treeview_context_menu
+from gui.widgets.tooltip import ToolTip
 
 
 class ChatWindow(tk.Toplevel):
@@ -65,11 +67,20 @@ class ChatWindow(tk.Toplevel):
         
         self.session_tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
+        # Context menu nas sessoes (botao direito)
+        attach_treeview_context_menu(self.session_tree, [
+            ("🗑️ Excluir Chat", self._delete_session),
+        ])
+
         # Session Actions
         session_btn_frame = ttk.Frame(left_panel)
         session_btn_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(session_btn_frame, text="Novo Chat", command=self._new_session).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(session_btn_frame, text="Excluir", command=self._delete_session).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        btn_new = ttk.Button(session_btn_frame, text="Novo Chat", command=self._new_session)
+        btn_new.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ToolTip(btn_new, "Iniciar nova conversa com a IA")
+        btn_del = ttk.Button(session_btn_frame, text="Excluir", command=self._delete_session)
+        btn_del.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ToolTip(btn_del, "Excluir conversa selecionada")
 
         # RIGHT PANEL (Chat)
         right_panel = ttk.Frame(self.paned)
@@ -78,6 +89,7 @@ class ChatWindow(tk.Toplevel):
         # Chat Area
         self.chat_area = scrolledtext.ScrolledText(right_panel, state=tk.DISABLED, wrap=tk.WORD, font=("Segoe UI", 10))
         self.chat_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        attach_text_context_menu(self.chat_area, readonly=True)
         
         self.chat_area.tag_config("user", foreground="#007acc", font=("Segoe UI", 10, "bold"))
         self.chat_area.tag_config("assistant", foreground="#2e7d32", font=("Segoe UI", 10, "bold"))
@@ -90,10 +102,12 @@ class ChatWindow(tk.Toplevel):
         self.input_text = tk.Text(input_frame, height=3, font=("Segoe UI", 10))
         self.input_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         self.input_text.bind("<Return>", self._on_enter_press)
-        self.input_text.bind("<Shift-Return>", lambda e: None) 
+        self.input_text.bind("<Shift-Return>", lambda e: None)
+        attach_text_context_menu(self.input_text, readonly=False)
 
         self.send_btn = ttk.Button(input_frame, text="Enviar", command=self._send_message)
         self.send_btn.pack(side=tk.RIGHT)
+        ToolTip(self.send_btn, "Enviar mensagem (Enter)")
         
         self.status_label = ttk.Label(right_panel, text="Ollama: Conectando...", font=("Segoe UI", 8))
         self.status_label.pack(anchor=tk.W, padx=5)
@@ -213,7 +227,7 @@ class ChatWindow(tk.Toplevel):
         self.chat_history.append({"role": "user", "content": runtime_text})
         
         self.send_btn.config(state=tk.DISABLED)
-        self.status_label.config(text="Ollama: Digitando...")
+        self.status_label.config(text="Ollama: Gerando resposta...")
         
         threading.Thread(target=self._process_ollama_response, daemon=True).start()
 

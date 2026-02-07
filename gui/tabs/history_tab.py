@@ -5,6 +5,8 @@ from datetime import datetime
 from tkinter import ttk, messagebox
 
 from database import get_history, clear_history
+from gui.widgets.context_menu import attach_treeview_context_menu
+from gui.widgets.tooltip import ToolTip
 
 
 def format_datetime_local(value) -> str:
@@ -51,38 +53,60 @@ class HistoryTab(ttk.Frame):
 
         tree_scroll.config(command=self.history_tree.yview)
 
+        # Double-click para reprocessar
+        self.history_tree.bind("<Double-1>", lambda e: self._reprocess_selected())
+
+        # Context menu na treeview (botao direito)
+        attach_treeview_context_menu(self.history_tree, [
+            ("🔄 Reprocessar", self._reprocess_selected),
+            ("📄 Copiar URL", self._copy_selected_url),
+            None,
+            ("🔊 Abrir Audio", self._open_selected_audio),
+            ("🎬 Abrir Video", self._open_selected_video),
+        ])
+
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill="x", padx=10, pady=(0, 10))
 
-        ttk.Button(
+        btn_refresh = ttk.Button(
             btn_frame,
             text="Atualizar",
             command=self.refresh,
-        ).pack(side="left", padx=(0, 5))
+        )
+        btn_refresh.pack(side="left", padx=(0, 5))
+        ToolTip(btn_refresh, "Atualizar lista do historico")
 
-        ttk.Button(
+        btn_clear = ttk.Button(
             btn_frame,
             text="Limpar Historico",
             command=self._clear_history,
-        ).pack(side="left")
+        )
+        btn_clear.pack(side="left")
+        ToolTip(btn_clear, "Remover todos os registros do historico")
 
-        ttk.Button(
+        btn_reprocess = ttk.Button(
             btn_frame,
             text="Reprocessar",
             command=self._reprocess_selected,
-        ).pack(side="left", padx=(5, 0))
+        )
+        btn_reprocess.pack(side="left", padx=(5, 0))
+        ToolTip(btn_reprocess, "Adicionar URL a fila para reprocessar")
 
-        ttk.Button(
+        btn_audio = ttk.Button(
             btn_frame,
             text="Abrir Audio",
             command=self._open_selected_audio,
-        ).pack(side="right")
+        )
+        btn_audio.pack(side="right")
+        ToolTip(btn_audio, "Reproduzir arquivo de audio")
 
-        ttk.Button(
+        btn_video = ttk.Button(
             btn_frame,
             text="Abrir Video",
             command=self._open_selected_video,
-        ).pack(side="right", padx=(0, 5))
+        )
+        btn_video.pack(side="right", padx=(0, 5))
+        ToolTip(btn_video, "Reproduzir arquivo de video")
 
     def refresh(self):
         for item in self.history_tree.get_children():
@@ -122,6 +146,13 @@ class HistoryTab(ttk.Frame):
     def _open_selected_video(self):
         path = self._get_selected_tag(3)
         self._open_path(path)
+
+    def _copy_selected_url(self):
+        """Copia a URL do item selecionado para o clipboard"""
+        url = self._get_selected_tag(0)
+        if url:
+            self.clipboard_clear()
+            self.clipboard_append(url)
 
     def _reprocess_selected(self):
         url = self._get_selected_tag(0)

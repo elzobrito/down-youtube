@@ -7,6 +7,8 @@ from gui.widgets.stage_progress_panel import StageProgressPanels
 from gui.widgets.stats_panel import SystemStatsPanel
 from gui.widgets.enhanced_log import EnhancedLog
 from gui.widgets.nerd_panel import NerdPanel
+from gui.widgets.context_menu import attach_entry_context_menu
+from gui.widgets.tooltip import ToolTip
 
 
 class DownloadTab(ttk.Frame):
@@ -25,6 +27,8 @@ class DownloadTab(ttk.Frame):
         self.url_entry = ttk.Entry(input_frame, font=("Segoe UI", 11))
         self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         self.url_entry.bind("<Return>", lambda e: self._process_single())
+        self.url_entry.bind("<Escape>", lambda e: self.url_entry.delete(0, tk.END))
+        self._create_context_menu()
 
         self.btn_process = ttk.Button(
             input_frame,
@@ -32,6 +36,7 @@ class DownloadTab(ttk.Frame):
             command=self._process_single,
         )
         self.btn_process.pack(side=tk.RIGHT)
+        ToolTip(self.btn_process, "Processar a URL digitada (Enter)")
 
         self.btn_local = ttk.Button(
             input_frame,
@@ -39,6 +44,7 @@ class DownloadTab(ttk.Frame):
             command=self._process_local_file,
         )
         self.btn_local.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(self.btn_local, "Selecionar arquivo local de audio/video")
 
         # 2. Pipeline Badge
         self.pipeline_badge = PipelineBadge(self)
@@ -63,6 +69,7 @@ class DownloadTab(ttk.Frame):
             state=tk.DISABLED,
         )
         self.btn_cancel.pack(side=tk.RIGHT)
+        ToolTip(self.btn_cancel, "Cancelar o processamento atual (Esc)")
 
         # 5. NERD Panel (antes do log para ficar visível)
         self.nerd_panel = NerdPanel(self)
@@ -75,13 +82,62 @@ class DownloadTab(ttk.Frame):
         self.log = EnhancedLog(log_container)
         self.log.pack(fill=tk.BOTH, expand=True)
 
+    def _create_context_menu(self):
+        """Cria menu de contexto para o campo de URL (Botão Direito)"""
+        menu = attach_entry_context_menu(self.url_entry)
+        menu.add_separator()
+        menu.add_command(label="🔗 Colar URL do Clipboard", command=self._paste_url_from_clipboard)
+
+    def _paste_url_from_clipboard(self):
+        """Cola URL do clipboard no campo, se for uma URL de video"""
+        try:
+            clip = self.clipboard_get().strip()
+            if clip and ("youtube.com" in clip or "youtu.be" in clip or "http" in clip):
+                self.url_entry.delete(0, tk.END)
+                self.url_entry.insert(0, clip)
+        except tk.TclError:
+            pass
+
+    def check_clipboard_url(self):
+        """Se campo URL vazio e clipboard tem URL do YouTube, auto-preenche"""
+        if self.url_entry.get().strip():
+            return
+        try:
+            clip = self.clipboard_get().strip()
+            if clip and ("youtube.com" in clip or "youtu.be" in clip):
+                self.url_entry.delete(0, tk.END)
+                self.url_entry.insert(0, clip)
+                self.url_entry.select_range(0, "end")
+        except tk.TclError:
+            pass
 
     def _process_single(self):
         url = self.url_entry.get().strip()
+
+        # Se vazio, tentar clipboard antes de reclamar
         if not url:
-            messagebox.showwarning("Aviso", "Digite uma URL valida.")
+            try:
+                clip = self.clipboard_get().strip()
+                if clip and ("youtube.com" in clip or "youtu.be" in clip):
+                    if messagebox.askyesno(
+                        "Clipboard Detectado",
+                        f"Encontrei uma URL no clipboard:\n\n{clip}\n\nDeseja processar?"
+                    ):
+                        self.url_entry.insert(0, clip)
+                        url = clip
+                    else:
+                        return
+                else:
+                    messagebox.showwarning("Aviso", "Digite uma URL valida.")
+                    return
+            except tk.TclError:
+                messagebox.showwarning("Aviso", "Digite uma URL valida.")
+                return
+
+        if not url:
             return
         self.app.start_urls([url])
+        self.url_entry.delete(0, tk.END)
 
     def _process_local_file(self):
         filetypes = [
@@ -102,6 +158,7 @@ class DownloadTab(ttk.Frame):
             self.reset_progress()
             self.start_time = time.time()
             self.stats_panel.start_timer()
+            self.log.add_separator() # Separa visualmente do log anterior
         else:
             self.btn_process.config(state=tk.NORMAL)
             self.btn_local.config(state=tk.NORMAL)

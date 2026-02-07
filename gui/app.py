@@ -37,7 +37,9 @@ class YouTubeTranscriberApp:
         self.worker = None
         self._create_menu()
         self._create_notebook()
+        self._setup_global_shortcuts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Escape>", self._on_escape)
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -77,6 +79,33 @@ class YouTubeTranscriberApp:
         self.notebook.add(self.library_tab, text="Biblioteca")
         self.notebook.add(self.history_tab, text="Historico")
         self.notebook.add(self.settings_tab, text="Configuracoes")
+
+    def _setup_global_shortcuts(self):
+        """Configura atalhos de teclado globais"""
+        # Ctrl+A seleciona tudo em qualquer Entry
+        self.root.bind_class(
+            "TEntry", "<Control-a>",
+            lambda e: (e.widget.select_range(0, "end"), e.widget.icursor("end"), "break"),
+        )
+        # Ctrl+L foca no campo URL da aba Download
+        self.root.bind("<Control-l>", self._focus_url_entry)
+        # Detectar troca de aba para clipboard inteligente
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _focus_url_entry(self, event=None):
+        """Foca no campo URL da aba Download"""
+        self.select_tab("download")
+        self.download_tab.url_entry.focus_set()
+        return "break"
+
+    def _on_tab_changed(self, event=None):
+        """Ao trocar para a aba Download, verifica clipboard por URLs"""
+        try:
+            current = self.notebook.index(self.notebook.select())
+        except Exception:
+            return
+        if current == 0:  # Download tab
+            self.download_tab.check_clipboard_url()
 
     def select_tab(self, name):
         tab = self.tabs.get(name)
@@ -156,6 +185,17 @@ class YouTubeTranscriberApp:
         if self.worker:
             self.worker.cancelar()
             self._log("⏳ Cancelando...")
+
+    def _on_escape(self, event):
+        """Cancela processamento ao pressionar Escape (se não estiver em campo de texto)"""
+        # Verificar se o foco está em um widget de entrada de texto
+        focused_widget = self.root.focus_get()
+        if isinstance(focused_widget, (tk.Entry, tk.Text)):
+            return  # Deixa o Escape funcionar normalmente nos campos de texto
+        
+        # Se há processamento em andamento, cancela
+        if self.worker and self.worker.running:
+            self.cancel_process()
 
     def _log(self, message):
         self.root.after(0, lambda: self.download_tab.log_message(str(message), "info"))

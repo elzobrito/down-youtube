@@ -77,6 +77,7 @@ class EnhancedLog(ttk.Frame):
         self.log_text.tag_config("warning", foreground="#ffc107", font=("Consolas", 9, "bold"))
         self.log_text.tag_config("info", foreground="#007bff")
         self.log_text.tag_config("debug", foreground="#6c757d", font=("Consolas", 8, "italic"))
+        self.log_text.tag_config("separator", foreground="#cccccc", justify='center')
         
         # Ícones especiais
         self.log_text.tag_config("icon", font=("Segoe UI Emoji", 10))
@@ -115,6 +116,14 @@ class EnhancedLog(ttk.Frame):
         
         self.log_text.config(state=tk.DISABLED)
     
+    def add_separator(self):
+        """Adiciona uma linha separadora visual no log"""
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, "\n" + "─" * 40 + "\n", "separator")
+        if self.auto_scroll:
+            self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
     def _clear_log(self):
         """Limpa o log"""
         if messagebox.askyesno("Confirmar", "Limpar todo o log?"):

@@ -10,6 +10,8 @@ from database import (
     remove_queue_item,
     clear_queue,
 )
+from gui.widgets.context_menu import attach_entry_context_menu, attach_treeview_context_menu
+from gui.widgets.tooltip import ToolTip
 
 
 class QueueTab(ttk.Frame):
@@ -28,12 +30,16 @@ class QueueTab(ttk.Frame):
         self.queue_entry = ttk.Entry(input_frame, font=("Segoe UI", 10))
         self.queue_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.queue_entry.bind("<Return>", lambda e: self._add_to_queue())
+        self.queue_entry.bind("<Escape>", lambda e: self.queue_entry.delete(0, tk.END))
+        attach_entry_context_menu(self.queue_entry)
 
-        ttk.Button(
+        btn_add = ttk.Button(
             input_frame,
             text="Adicionar",
             command=self._add_to_queue,
-        ).pack(side=tk.RIGHT)
+        )
+        btn_add.pack(side=tk.RIGHT)
+        ToolTip(btn_add, "Adicionar URL a fila (Enter)")
 
         list_frame = ttk.LabelFrame(self, text="URLs na Fila", padding=10)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
@@ -57,26 +63,39 @@ class QueueTab(ttk.Frame):
 
         tree_scroll.config(command=self.queue_tree.yview)
 
+        # Context menu na treeview (botao direito)
+        attach_treeview_context_menu(self.queue_tree, [
+            ("📄 Copiar URL", self._copy_selected_url),
+            None,
+            ("🗑️ Remover", self._remove_from_queue),
+        ])
+
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
 
-        ttk.Button(
+        btn_remove = ttk.Button(
             btn_frame,
             text="Remover Selecionado",
             command=self._remove_from_queue,
-        ).pack(side=tk.LEFT, padx=(0, 5))
+        )
+        btn_remove.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(btn_remove, "Remover itens selecionados da fila")
 
-        ttk.Button(
+        btn_clear = ttk.Button(
             btn_frame,
             text="Limpar Fila",
             command=self._clear_queue,
-        ).pack(side=tk.LEFT)
+        )
+        btn_clear.pack(side=tk.LEFT)
+        ToolTip(btn_clear, "Remover todos os itens da fila")
 
-        ttk.Button(
+        btn_import = ttk.Button(
             btn_frame,
             text="Importar Lista",
             command=self._import_list,
-        ).pack(side=tk.LEFT, padx=(5, 0))
+        )
+        btn_import.pack(side=tk.LEFT, padx=(5, 0))
+        ToolTip(btn_import, "Importar URLs de um arquivo .txt")
 
         self.btn_process_queue = ttk.Button(
             btn_frame,
@@ -84,6 +103,7 @@ class QueueTab(ttk.Frame):
             command=self._process_queue,
         )
         self.btn_process_queue.pack(side=tk.RIGHT)
+        ToolTip(self.btn_process_queue, "Processar todos os itens pendentes da fila")
 
     def set_processing(self, processing):
         if processing:
@@ -103,6 +123,15 @@ class QueueTab(ttk.Frame):
             return
         self.add_url(url)
         self.queue_entry.delete(0, tk.END)
+
+    def _copy_selected_url(self):
+        """Copia a URL do item selecionado para o clipboard"""
+        selected = self.queue_tree.selection()
+        if selected:
+            values = self.queue_tree.item(selected[0])["values"]
+            if values:
+                self.clipboard_clear()
+                self.clipboard_append(str(values[0]))
 
     def _remove_from_queue(self):
         selected = self.queue_tree.selection()

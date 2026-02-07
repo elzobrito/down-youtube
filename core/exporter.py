@@ -2,8 +2,6 @@ from pathlib import Path
 
 
 class Exporter:
-    _SUBTITLE_ENCODING = "utf-8-sig"
-
     @staticmethod
     def to_txt(text, filepath):
         Path(filepath).write_text(text or "", encoding="utf-8")
@@ -11,8 +9,7 @@ class Exporter:
     @staticmethod
     def to_srt(segments, filepath):
         if not segments:
-            # Use UTF-8 with BOM for better compatibility with subtitle players.
-            Path(filepath).write_text("", encoding=Exporter._SUBTITLE_ENCODING)
+            Path(filepath).write_text("", encoding="utf-8")
             return
 
         lines = []
@@ -22,18 +19,12 @@ class Exporter:
             text = seg.get("text", "")
             lines.append(f"{i}\n{start} --> {end}\n{text}\n")
 
-        Path(filepath).write_text(
-            "\n".join(lines),
-            encoding=Exporter._SUBTITLE_ENCODING,
-        )
+        Path(filepath).write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def to_vtt(segments, filepath):
         if not segments:
-            Path(filepath).write_text(
-                "WEBVTT\n\n",
-                encoding=Exporter._SUBTITLE_ENCODING,
-            )
+            Path(filepath).write_text("WEBVTT\n\n", encoding="utf-8")
             return
 
         lines = ["WEBVTT\n"]
@@ -43,10 +34,7 @@ class Exporter:
             text = seg.get("text", "")
             lines.append(f"{start} --> {end}\n{text}\n")
 
-        Path(filepath).write_text(
-            "\n".join(lines),
-            encoding=Exporter._SUBTITLE_ENCODING,
-        )
+        Path(filepath).write_text("\n".join(lines), encoding="utf-8")
 
     @staticmethod
     def to_docx(text, filepath, title="Transcription"):

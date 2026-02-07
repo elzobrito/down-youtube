@@ -15,6 +15,13 @@ from database import (
     toggle_transcription_used,
 )
 from gui.tabs.chat_tab import ChatWindow
+from gui.widgets.context_menu import (
+    attach_entry_context_menu,
+    attach_text_context_menu,
+    attach_treeview_context_menu,
+)
+from gui.widgets.status_flash import StatusFlash
+from gui.widgets.tooltip import ToolTip
 
 
 class LibraryTab(ttk.Frame):
@@ -32,6 +39,8 @@ class LibraryTab(ttk.Frame):
         self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=40)
         self.search_entry.pack(side=tk.LEFT, padx=(0, 10))
         self.search_entry.bind("<Return>", lambda e: self._search())
+        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
+        attach_entry_context_menu(self.search_entry)
 
         ttk.Button(search_frame, text="Buscar", command=self._search).pack(side=tk.LEFT)
         ttk.Button(search_frame, text="Limpar", command=self._clear_search).pack(
@@ -71,7 +80,6 @@ class LibraryTab(ttk.Frame):
         self.tree.column("data", width=110)
         self.tree.column("usado", width=50, anchor="center")
 
-
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
 
@@ -80,6 +88,17 @@ class LibraryTab(ttk.Frame):
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", self._open_transcription)
+
+        # Context menu na treeview (botao direito)
+        attach_treeview_context_menu(self.tree, [
+            ("📂 Abrir", lambda: self._open_transcription()),
+            ("📄 Copiar Texto", self._copy_text),
+            None,
+            ("✓ Marcar como Usado", self._toggle_used),
+            ("💬 Chat IA", self._open_chat),
+            None,
+            ("🗑️ Excluir", self._delete_selected),
+        ])
 
         preview_frame = ttk.LabelFrame(paned, text="Preview", padding=10)
         paned.add(preview_frame, weight=2)
@@ -91,29 +110,34 @@ class LibraryTab(ttk.Frame):
             state=tk.DISABLED,
         )
         self.preview_text.pack(fill=tk.BOTH, expand=True)
+        attach_text_context_menu(self.preview_text, readonly=True)
 
         action_frame = ttk.Frame(self)
         action_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
 
-        ttk.Button(action_frame, text="Abrir", command=self._open_transcription).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="Abrir Audio", command=self._open_audio).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="Abrir Video", command=self._open_video).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="Copiar", command=self._copy_text).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="Excluir", command=self._delete_selected).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="✓ Usado", command=self._toggle_used).pack(
-            side=tk.LEFT, padx=2
-        )
+        btn_open = ttk.Button(action_frame, text="Abrir", command=self._open_transcription)
+        btn_open.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_open, "Abrir transcricao completa")
 
+        btn_audio = ttk.Button(action_frame, text="Abrir Audio", command=self._open_audio)
+        btn_audio.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_audio, "Reproduzir arquivo de audio")
+
+        btn_video = ttk.Button(action_frame, text="Abrir Video", command=self._open_video)
+        btn_video.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_video, "Reproduzir arquivo de video")
+
+        btn_copy = ttk.Button(action_frame, text="Copiar", command=self._copy_text)
+        btn_copy.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_copy, "Copiar texto da transcricao")
+
+        btn_delete = ttk.Button(action_frame, text="Excluir", command=self._delete_selected)
+        btn_delete.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_delete, "Excluir transcricao selecionada")
+
+        btn_used = ttk.Button(action_frame, text="✓ Usado", command=self._toggle_used)
+        btn_used.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_used, "Marcar/desmarcar como usada")
 
         export_menu_btn = ttk.Menubutton(action_frame, text="Exportar")
         export_menu = tk.Menu(export_menu_btn, tearoff=0)
@@ -126,17 +150,23 @@ class LibraryTab(ttk.Frame):
         export_menu.add_command(label="Exportar Todos (ZIP)", command=self._export_all)
         export_menu_btn["menu"] = export_menu
         export_menu_btn.pack(side=tk.LEFT, padx=10)
+        ToolTip(export_menu_btn, "Exportar em varios formatos")
 
-        ttk.Button(action_frame, text="Enviar para Drive", command=self._upload_to_drive).pack(
-            side=tk.LEFT, padx=2
-        )
-        ttk.Button(action_frame, text="Chat IA", command=self._open_chat).pack(
-            side=tk.LEFT, padx=2
-        )
+        btn_drive = ttk.Button(action_frame, text="Enviar para Drive", command=self._upload_to_drive)
+        btn_drive.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_drive, "Enviar transcricao para Google Drive")
 
-        ttk.Button(action_frame, text="Traduzir", command=self._translate_selected).pack(
-            side=tk.RIGHT, padx=2
-        )
+        btn_chat = ttk.Button(action_frame, text="Chat IA", command=self._open_chat)
+        btn_chat.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_chat, "Abrir chat com IA sobre esta transcricao")
+
+        btn_translate = ttk.Button(action_frame, text="Traduzir", command=self._translate_selected)
+        btn_translate.pack(side=tk.RIGHT, padx=2)
+        ToolTip(btn_translate, "Traduzir transcricao para outro idioma")
+
+        # Flash status nao-bloqueante
+        self.status_flash = StatusFlash(action_frame)
+        self.status_flash.pack(side=tk.LEFT, padx=10)
 
     def _load_transcriptions(self):
         for item in self.tree.get_children():
@@ -153,8 +183,8 @@ class LibraryTab(ttk.Frame):
                 date_str = created.strftime("%d/%m/%Y %H:%M")
             else:
                 date_str = str(created)[:16]
-            
-            used_str = "✅" if is_used else ""
+
+            used_str = "\u2705" if is_used else ""
 
             self.tree.insert(
                 "",
@@ -168,7 +198,6 @@ class LibraryTab(ttk.Frame):
                     used_str,
                 ),
             )
-
 
         stats = get_transcription_stats()
         self.stats_label.config(
@@ -289,7 +318,7 @@ class LibraryTab(ttk.Frame):
                 transcription.get("video_title") or "Transcricao",
             )
 
-        messagebox.showinfo("Sucesso", f"Exportado para: {filepath}")
+        self.status_flash.flash(f"Exportado: {os.path.basename(filepath)}", level="success")
 
     def _export_all(self):
         messagebox.showinfo("Info", "Exportacao em massa sera adicionada.")
@@ -300,7 +329,7 @@ class LibraryTab(ttk.Frame):
             return
         self.clipboard_clear()
         self.clipboard_append(transcription.get("full_text") or "")
-        messagebox.showinfo("Sucesso", "Texto copiado.")
+        self.status_flash.flash("Texto copiado para a area de transferencia!", level="success")
 
     def _delete_selected(self):
         selection = self.tree.selection()
@@ -315,26 +344,27 @@ class LibraryTab(ttk.Frame):
         """Toggle the 'usado' (used) flag for selected transcription"""
         selection = self.tree.selection()
         if not selection:
-            messagebox.showwarning("Aviso", "Selecione uma transcrição primeiro.")
+            messagebox.showwarning("Aviso", "Selecione uma transcricao primeiro.")
             return
-        
+
         transcription_id = int(selection[0])
         new_value = toggle_transcription_used(transcription_id)
-        
+
         # Atualizar a linha na treeview sem recarregar toda a lista
         current_values = self.tree.item(selection[0], "values")
-        new_used_str = "✅" if new_value else ""
+        new_used_str = "\u2705" if new_value else ""
         self.tree.item(
             selection[0],
             values=(current_values[0], current_values[1], current_values[2], current_values[3], new_used_str)
         )
+        status_text = "Marcada como usada" if new_value else "Desmarcada"
+        self.status_flash.flash(status_text, level="info")
 
     def _open_transcription(self, event=None):
         transcription = self._get_selected_transcription()
         if not transcription:
             return
         TranscriptionViewer(self, transcription)
-
 
     def _open_audio(self):
         transcription = self._get_selected_transcription()
@@ -359,9 +389,6 @@ class LibraryTab(ttk.Frame):
         if not transcription:
             messagebox.showwarning("Aviso", "Selecione uma transcricao para iniciar o chat.")
             return
-        
-        # Check if window already open for this transcription? 
-        # For now, just open new one
         ChatWindow(self, self.app, transcription)
 
     def _get_selected_transcription(self):
@@ -390,7 +417,6 @@ class TranscriptionViewer(tk.Toplevel):
     def __init__(self, parent, transcription):
         super().__init__(parent)
         self.transcription = transcription
-        self.view_mode = tk.StringVar(value="text")
 
         title = (transcription.get("video_title") or "Transcricao")[:50]
         self.title(f"Transcricao - {title}")
@@ -412,25 +438,10 @@ class TranscriptionViewer(tk.Toplevel):
         ttk.Button(toolbar, text="Exportar", command=self._export).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Label(toolbar, text="Visualizacao:").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Radiobutton(
-            toolbar,
-            text="Transcricao",
-            variable=self.view_mode,
-            value="text",
-            command=self._load_content,
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(
-            toolbar,
-            text="Legenda",
-            variable=self.view_mode,
-            value="subtitle",
-            command=self._load_content,
-        ).pack(side=tk.LEFT, padx=2)
 
         self.text = scrolledtext.ScrolledText(self, font=("Consolas", 11), wrap=tk.WORD)
         self.text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        attach_text_context_menu(self.text, readonly=False)
 
         self.status = ttk.Label(self, text="")
         self.status.pack(fill=tk.X, padx=10, pady=(0, 5))
@@ -439,58 +450,21 @@ class TranscriptionViewer(tk.Toplevel):
 
     def _load_content(self):
         self.text.delete(1.0, tk.END)
-        mode = self.view_mode.get()
-        if mode == "subtitle":
-            self.text.insert(tk.END, self._build_subtitle_content())
-        else:
-            self.text.insert(tk.END, self.transcription.get("full_text") or "")
+        self.text.insert(tk.END, self.transcription.get("full_text") or "")
 
-        mode_label = "Legenda" if mode == "subtitle" else "Transcricao"
-        has_segments = "com segmentos" if self.transcription.get("segments") else "sem segmentos"
         self.status.config(
             text=(
                 f"Palavras: {self.transcription.get('word_count', 0):,} | "
                 f"Modelo: {self.transcription.get('model', '')} | "
-                f"Idioma: {self.transcription.get('language', '')} | "
-                f"Modo: {mode_label} ({has_segments})"
+                f"Idioma: {self.transcription.get('language', '')}"
             )
         )
-
-    def _build_subtitle_content(self):
-        segments = self.transcription.get("segments") or []
-        if not segments:
-            return (
-                "Sem segmentos de legenda nesta transcricao.\n\n"
-                "Gere uma nova transcricao para disponibilizar o modo legenda."
-            )
-
-        lines = []
-        for i, seg in enumerate(segments, 1):
-            text = (seg.get("text") or "").strip()
-            if not text:
-                continue
-
-            try:
-                start_seconds = float(seg.get("start", 0) or 0)
-            except (TypeError, ValueError):
-                start_seconds = 0.0
-            try:
-                end_seconds = float(seg.get("end", 0) or 0)
-            except (TypeError, ValueError):
-                end_seconds = start_seconds
-
-            start = Exporter._format_timestamp_srt(start_seconds)
-            end = Exporter._format_timestamp_srt(max(end_seconds, start_seconds))
-            lines.append(f"{i}\n{start} --> {end}\n{text}\n")
-
-        if not lines:
-            return "Sem texto util nos segmentos de legenda."
-
-        return "\n".join(lines).strip() + "\n"
 
     def _copy_all(self):
         self.clipboard_clear()
         self.clipboard_append(self.text.get(1.0, tk.END))
+        self.status.config(text="Texto copiado para a area de transferencia!")
+        self.after(3000, self._load_content)
 
     def _show_search(self):
         query = simpledialog.askstring("Buscar", "Digite o texto:")
@@ -545,4 +519,5 @@ class TranscriptionViewer(tk.Toplevel):
             messagebox.showwarning("Aviso", "Formato nao suportado.")
             return
 
-        messagebox.showinfo("Sucesso", f"Exportado para: {filepath}")
+        self.status.config(text=f"Exportado: {os.path.basename(filepath)}")
+        self.after(3000, self._load_content)

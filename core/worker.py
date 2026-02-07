@@ -431,7 +431,6 @@ class TranscriberWorker:
         if arquivo_txt:
             self.log(f"✅ Transcricao salva: {arquivo_txt}")
             text = ""
-            segments = None
 
             try:
                 with open(arquivo_txt, "r", encoding="utf-8", errors="replace") as f:
@@ -439,18 +438,9 @@ class TranscriberWorker:
             except Exception as e:
                 self.log(f"❌ Erro leitura: {e}")
 
-            srt_path = Transcriber.find_srt_file(audio_path)
-            if srt_path:
-                segments = Transcriber.parse_srt_file(srt_path)
-                if segments:
-                    self.log(f"📝 Segmentos de legenda carregados: {len(segments)}")
-                else:
-                    self.log("⚠️ Nao foi possivel extrair segmentos do SRT gerado.")
-
             save_transcription(
                 video_db_id,
                 text,
-                segments=segments,
                 language=cfg["whisper_language"],
                 model=cfg["whisper_model"],
                 audio_hash=audio_hash

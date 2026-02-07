@@ -3,6 +3,8 @@ from tkinter import ttk, filedialog, messagebox
 
 from database import get_setting, set_setting
 from utils.backup import backup_database, restore_database
+from gui.widgets.context_menu import attach_entry_context_menu
+from gui.widgets.tooltip import ToolTip
 
 
 class SettingsTab(ttk.Frame):
@@ -48,12 +50,14 @@ class SettingsTab(ttk.Frame):
             ),
         ).pack(side=tk.LEFT, padx=2)
         
-        ttk.Button(
+        btn_test_ffmpeg = ttk.Button(
             ffmpeg_buttons,
             text="🧪 Testar",
             width=10,
             command=self._test_ffmpeg,
-        ).pack(side=tk.LEFT, padx=2)
+        )
+        btn_test_ffmpeg.pack(side=tk.LEFT, padx=2)
+        ToolTip(btn_test_ffmpeg, "Verificar se o FFmpeg esta funcionando")
 
         ttk.Label(paths_frame, text="Whisper CLI:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.whisper_cli_var = tk.StringVar(value=get_setting("whisper_cli"))
@@ -208,12 +212,14 @@ class SettingsTab(ttk.Frame):
             variable=self.notifications_var,
         ).pack(side=tk.LEFT)
 
-        ttk.Button(
+        btn_test_notif = ttk.Button(
             notification_frame,
             text="Testar",
             width=8,
             command=self._test_notification,
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        )
+        btn_test_notif.pack(side=tk.LEFT, padx=(10, 0))
+        ToolTip(btn_test_notif, "Enviar notificacao de teste")
 
         self.streaming_var = tk.BooleanVar(value=get_setting("use_streaming_pipeline") == "1")
         ttk.Checkbutton(
@@ -257,17 +263,21 @@ class SettingsTab(ttk.Frame):
         backup_frame = ttk.LabelFrame(scrollable_frame, text="Backup", padding=15)
         backup_frame.pack(fill=tk.X, padx=10, pady=10)
 
-        ttk.Button(
+        btn_backup = ttk.Button(
             backup_frame,
             text="Fazer Backup",
             command=self._backup_database,
-        ).pack(side=tk.LEFT, padx=(0, 5))
+        )
+        btn_backup.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(btn_backup, "Criar copia de seguranca do banco de dados")
 
-        ttk.Button(
+        btn_restore = ttk.Button(
             backup_frame,
             text="Restaurar Backup",
             command=self._restore_database,
-        ).pack(side=tk.LEFT)
+        )
+        btn_restore.pack(side=tk.LEFT)
+        ToolTip(btn_restore, "Restaurar banco de dados a partir de backup")
 
         btn_frame = ttk.Frame(scrollable_frame)
         btn_frame.pack(fill=tk.X, padx=10, pady=20)
@@ -280,6 +290,17 @@ class SettingsTab(ttk.Frame):
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Adicionar context menu (botao direito) em todos os campos Entry
+        self._apply_context_menus(scrollable_frame)
+
+    def _apply_context_menus(self, parent):
+        """Aplica context menu em todos os Entry encontrados recursivamente"""
+        for child in parent.winfo_children():
+            if isinstance(child, ttk.Entry):
+                attach_entry_context_menu(child)
+            elif hasattr(child, 'winfo_children'):
+                self._apply_context_menus(child)
 
     def _browse_file(self, var, filetypes):
         filepath = filedialog.askopenfilename(filetypes=filetypes)
