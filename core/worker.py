@@ -441,6 +441,7 @@ class TranscriberWorker:
             save_transcription(
                 video_db_id,
                 text,
+                segments=transcriber.last_segments,
                 language=cfg["whisper_language"],
                 model=cfg["whisper_model"],
                 audio_hash=audio_hash

@@ -31,6 +31,7 @@ class Transcriber:
         self.progress_callback = progress_callback
         self.cancel_check = cancel_check_callback or (lambda: False)
         self.last_error = None
+        self.last_segments = None
         self._gpu_notice_logged = False
 
     def _log(self, message):
@@ -57,6 +58,7 @@ class Transcriber:
             "-m",
             self.model_path,
             "--output-txt",
+            "--output-srt",
         ]
 
         if self.threads and self.threads > 0:
@@ -83,6 +85,7 @@ class Transcriber:
 
         try:
             self.last_error = None
+            self.last_segments = None
             self._progress("Transcrevendo...")
 
             env = os.environ.copy()
@@ -130,10 +133,12 @@ class Transcriber:
                 )
                 arquivo_txt = Path(audio_path).with_suffix(".wav.txt")
                 if arquivo_txt.exists():
+                    self.last_segments = self._load_segments_for(arquivo_txt)
                     return str(arquivo_txt)
 
                 alternative_txt = Path(audio_path).with_suffix(".txt")
                 if alternative_txt.exists():
+                    self.last_segments = self._load_segments_for(alternative_txt)
                     return str(alternative_txt)
 
                 self._log_transcription_error(
@@ -223,6 +228,51 @@ class Transcriber:
         self._log(f"ℹ️ Comando: {command_str}")
         self._log(f"ℹ️ Audio: {audio_path}")
         self._log(f"ℹ️ Diretório: {diretorio_saida}")
+
+    @staticmethod
+    def _load_segments_for(txt_path):
+        srt_path = Path(str(txt_path)[:-4] + ".srt") if str(txt_path).endswith(".txt") else Path(txt_path).with_suffix(".srt")
+        if not srt_path.exists():
+            return None
+        try:
+            with open(srt_path, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+        except Exception:
+            return None
+        return Transcriber._parse_srt(content)
+
+    @staticmethod
+    def _parse_srt(content):
+        segments = []
+        for block in content.replace("\r\n", "\n").strip().split("\n\n"):
+            lines = [line for line in block.split("\n") if line.strip()]
+            if len(lines) < 2:
+                continue
+            timing_idx = 1 if "-->" in lines[1] else (0 if "-->" in lines[0] else -1)
+            if timing_idx == -1:
+                continue
+            try:
+                start_str, end_str = [part.strip() for part in lines[timing_idx].split("-->")]
+            except ValueError:
+                continue
+            text = " ".join(lines[timing_idx + 1:]).strip()
+            segments.append({
+                "start": Transcriber._srt_time_to_seconds(start_str),
+                "end": Transcriber._srt_time_to_seconds(end_str),
+                "text": text,
+            })
+        return segments or None
+
+    @staticmethod
+    def _srt_time_to_seconds(timestamp):
+        try:
+            hms, _, millis = timestamp.partition(",")
+            if not millis:
+                hms, _, millis = timestamp.partition(".")
+            hours, minutes, seconds = hms.split(":")
+            return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis or 0) / 1000.0
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _estimate_percent(elapsed, duration):
