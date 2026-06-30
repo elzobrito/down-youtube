@@ -1,360 +1,353 @@
 # YouTube Transcriber
 
-Aplicativo desktop completo para download, transcrição e gerenciamento de vídeos do YouTube. Integra **whisper.cpp** para transcrição local, **Ollama** para chat com IA sobre as transcrições, exportação em múltiplos formatos e uma interface rica com tema dark, tooltips, menus de contexto e modo NERD.
+Desktop application for downloading, transcribing, organizing, and exporting
+YouTube videos and local media files. It combines `yt-dlp`, FFmpeg,
+`whisper.cpp`, SQLite, and an optional Ollama-powered chat workflow in a
+cross-platform Tkinter interface.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)
 
----
+In one line:
 
-## Funcionalidades
+```text
+URL or media file -> Download/convert -> Transcribe -> Review/export/chat
+```
 
-| Categoria      | Features                                                                                               |
-| -------------- | ------------------------------------------------------------------------------------------------------ |
-| **Download**   | Streaming pipeline (download + conversão paralelos), cookies bypass, auto-detect yt-dlp, arquivo local |
-| **Transcrição** | whisper.cpp com GPU/CPU, configurável (threads, beam size, best of), detecção de duplicatas por hash  |
-| **Chat IA**    | Integração com Ollama, sessões persistentes, streaming de respostas, contexto da transcrição           |
-| **Exportação** | TXT, SRT, VTT, DOCX, PDF                                                                              |
-| **Biblioteca** | Busca full-text, filtro por idioma, preview, flag de uso, acesso a áudio/vídeo originais               |
-| **Fila**       | Fila persistente com prioridade, importação de .txt, processamento em lote                             |
-| **Histórico**  | Status por item, reprocessamento, acesso a arquivos                                                    |
-| **Interface**  | Tema Dark (VS Code-inspired), tooltips, menus de contexto, notificações flash, modo NERD               |
+## At A Glance
 
----
+- Runs on Windows and Linux with the same Python entry point.
+- Downloads YouTube audio or video through `yt-dlp`, with cookies support for
+  restricted sessions.
+- Processes local audio/video files without requiring a YouTube URL.
+- Transcribes locally through `whisper.cpp`, using CPU or GPU builds depending
+  on the installed backend.
+- Stores history, queues, settings, transcriptions, translations, and chat
+  sessions in SQLite.
+- Exports transcripts as TXT, SRT, VTT, DOCX, and PDF.
+- Provides an optional Ollama chat window for asking questions about completed
+  transcriptions.
+- Includes a streaming pipeline that overlaps download and conversion work,
+  plus traditional and keep-video modes.
 
-## Pré-requisitos
+## Feature Inventory
 
-### 1. Python 3.8+
+Implemented user-facing capabilities:
+
+| Area | Available functions |
+| --- | --- |
+| Input | YouTube URL processing, local audio/video file processing, clipboard URL detection, CLI URL arguments, URL list files |
+| Download | `yt-dlp` audio download, video download when keeping MP4, cookies file support, progress hooks, automatic fallback from streaming to traditional mode |
+| Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
+| Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash |
+| Queue | Add URLs, import `.txt` lists, process pending/failed items, retry count tracking, remove selected items, clear queue |
+| Library | Full-text search, language filter, preview pane, open full transcript, copy text, delete transcript, mark/unmark as used |
+| Media access | Open saved audio or video files through the operating system |
+| Export | TXT, SRT, VTT, DOCX, and PDF export for selected transcriptions |
+| Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription |
+| History | Processing records, status tracking, failed-item reprocessing |
+| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model |
+| Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
+| Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
+| Data safety | SQLite backup and restore from the Settings tab |
+| Portability | Portable-mode helpers through `portable.flag` |
+
+Present in the codebase but not fully wired into the current UI:
+
+| Area | Current state |
+| --- | --- |
+| Google Drive upload | Backend integration exists, but the Library button currently shows a placeholder message |
+| Translation | Translator helper exists, but the Library button currently shows a placeholder message |
+| Export all ZIP | Menu item exists, but the handler currently shows a placeholder message |
+| `yt-dlp` updater | Update helper exists, but there is no visible UI flow in the current app |
+
+## Quickstart
+
+```bash
+git clone https://github.com/seu-usuario/youtube-transcriber.git
+cd youtube-transcriber
+python -m venv .venv
+```
+
+Activate the environment:
+
+```bash
+# Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies and start the app:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python main.py
+```
+
+The same entry point also accepts CLI URLs:
+
+```bash
+python main.py "https://www.youtube.com/watch?v=..."
+python main.py --url "https://www.youtube.com/watch?v=..."
+python main.py --urls urls.txt
+```
+
+When no URL is passed, the desktop interface opens.
+
+## Requirements
+
+### Python
+
+Python 3.8 or newer is required.
 
 ```bash
 python --version
 ```
 
-### 2. FFmpeg
+### FFmpeg
+
+FFmpeg must be installed and available on `PATH`, or configured in the app
+settings.
 
 ```bash
-# Windows: baixe de https://www.gyan.dev/ffmpeg/builds/
-# Adicione ao PATH ou configure o caminho no app
 ffmpeg -version
 ```
 
-### 3. whisper.cpp
+Common install paths:
+
+| Platform | Typical setup |
+| --- | --- |
+| Linux | Install with the system package manager, for example `sudo apt install ffmpeg` |
+| Windows | Install a Windows build and add its `bin` directory to `PATH` |
+
+### whisper.cpp
+
+Build or install `whisper.cpp`, then download a model:
 
 ```bash
 git clone https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
-cmake -B build && cmake --build build --config Release
+cmake -B build
+cmake --build build --config Release
 ./models/download-ggml-model.sh base
 ```
 
-### 4. yt-dlp
+Configure the app with the path to the `whisper-cli` binary and the selected
+model file.
+
+### Ollama
+
+Ollama is optional and only needed for the chat feature.
 
 ```bash
-pip install yt-dlp
-```
-
-### 5. Ollama (opcional, para Chat IA)
-
-```bash
-# Baixe de https://ollama.com
 ollama pull llama3
 ```
 
----
+## Desktop Launcher
 
-## Instalação
+The Linux desktop launcher `YouTube Transcriber` calls:
 
-```bash
-git clone https://github.com/seu-usuario/youtube-transcriber.git
-cd youtube-transcriber
-pip install -r requirements.txt
-python main.py
+```text
+/home/elzobrito/.local/bin/youtube-transcriber
 ```
 
-### Dependências
+On this workstation, that wrapper intentionally uses the local virtual
+environment:
 
-| Pacote           | Uso                         |
-| ---------------- | --------------------------- |
-| `yt-dlp`         | Download de vídeos          |
-| `Pillow`         | Processamento de imagens    |
-| `python-docx`    | Exportação DOCX             |
-| `reportlab`      | Exportação PDF              |
-| `deep-translator` | Tradução                   |
-| `winotify`       | Notificações Windows Toast  |
-| `ttkthemes`      | Temas avançados para Tkinter |
+```text
+/home/elzobrito/.local/opt/down-youtube-venv
+```
 
----
+This keeps the launcher independent from a project `.venv` stored inside a
+Google Drive-synchronized folder. If the launcher stops opening, first verify
+that the wrapper points to an existing Python executable.
+
+## Dependencies
+
+| Package | Purpose |
+| --- | --- |
+| `yt-dlp` | YouTube download and metadata extraction |
+| `customtkinter` | Desktop UI components |
+| `Pillow` | Image handling |
+| `python-docx` | DOCX export |
+| `reportlab` | PDF export |
+| `deep-translator` | Translation support |
+| `google-auth-oauthlib` | Google OAuth support for Drive integration |
+| `google-api-python-client` | Google Drive API support |
+| `ttkthemes` | Tkinter themes |
+| `winotify` | Optional Windows toast notifications |
 
 ## Interface
 
-A aplicação é organizada em 6 abas:
+The app is organized around the main transcription workflow.
 
-### Download
+| Area | Purpose |
+| --- | --- |
+| Download | Process YouTube URLs or local files, monitor progress, cancel work, inspect logs, and view NERD metrics |
+| Queue | Add URLs, import `.txt` lists, process pending/failed items, remove items, and clear the queue |
+| Library | Search, filter, preview, open, copy, delete, export, and mark completed transcriptions as used |
+| Chat | Ask Ollama questions about a selected transcription and keep persistent sessions |
+| History | Review previous processing attempts and rerun failed items |
+| Settings | Configure paths, cookies, language, performance, media retention, notifications, streaming, themes, Ollama, and backups |
 
-Aba principal para processar URLs do YouTube ou arquivos locais.
+Useful shortcuts:
 
-- Campo de URL com detecção automática da área de transferência
-- Progresso em 3 estágios independentes:
-  - **Download** - MB baixados, velocidade, ETA
-  - **Conversão** - Formato, velocidade, tamanho
-  - **Transcrição** - Modelo, threads, tempo decorrido, palavras estimadas
-- Painel de estatísticas do sistema (tempo, disco, CPU, threads, ganho do pipeline)
-- Badge de pipeline mostrando o modo ativo (Streaming/Tradicional/Vídeo)
-- Log aprimorado com timestamps coloridos e botões Salvar/Limpar
-
-**Atalhos:**
-
-| Tecla    | Ação                       |
-| -------- | -------------------------- |
-| `Enter`  | Processar URL              |
-| `Escape` | Cancelar ou limpar campo   |
-| `Ctrl+L` | Focar no campo de URL      |
-
-### Fila
-
-Gerenciamento de múltiplas URLs para processamento em lote.
-
-- Adicionar URLs individualmente ou importar de arquivo .txt
-- Status por item: pendente, processando, concluído, falhou, pulado
-- Menu de contexto: copiar URL, remover item
-- Processamento sequencial automático de toda a fila
-
-### Biblioteca
-
-Central de gerenciamento das transcrições concluídas.
-
-- Busca full-text com snippets de preview
-- Filtro por idioma (Português, Inglês, Espanhol)
-- Painel de preview lateral
-- Estatísticas: total de transcrições, palavras e horas
-- Flag de uso (marcar transcrição como utilizada)
-- Acesso direto ao áudio e vídeo originais
-- Chat IA por transcrição (abre janela com Ollama)
-- Exportação em 5 formatos (TXT, SRT, VTT, DOCX, PDF)
-
-### Chat IA
-
-Janela de chat integrada com Ollama para interagir com as transcrições.
-
-- Sessões persistentes por transcrição (salvas no banco)
-- Injeção automática do texto da transcrição como contexto
-- Streaming de respostas em tempo real
-- Histórico de conversas com criação/exclusão de sessões
-- Indicador de status de conexão com o Ollama
-
-### Histórico
-
-Registro de todos os processamentos realizados.
-
-- Status: OK, Pulado, Erro
-- Reprocessamento de itens com falha
-- Acesso a arquivos de áudio/vídeo
-- Menu de contexto com copiar URL e reprocessar
-
-### Configurações
-
-| Seção           | Opções                                                          |
-| --------------- | --------------------------------------------------------------- |
-| **Caminhos**    | FFmpeg, Whisper CLI, modelo, diretório de saída, cookies        |
-| **Idioma**      | Português, Inglês, Espanhol, Francês, Alemão, Italiano, Auto   |
-| **Performance** | Threads (0=auto), beam size, best of, GPU CUDA                  |
-| **Opções**      | Manter áudio, manter vídeo, notificações, streaming pipeline    |
-| **Tema**        | Temas nativos + Dark Custom                                      |
-| **Ollama**      | URL do servidor, nome do modelo                                  |
-| **Backup**      | Criar/restaurar backup do banco de dados                         |
-
----
+| Shortcut | Action |
+| --- | --- |
+| `Enter` | Process the current URL |
+| `Escape` | Cancel or clear the current field |
+| `Ctrl+L` | Focus the URL field |
 
 ## Streaming Pipeline
 
-Download e conversão em paralelo, economizando 25-35% de tempo:
+The streaming pipeline overlaps download and conversion work to reduce total
+processing time.
 
 ```text
-Tradicional:  Download ━━━━━ 30s  ->  Conversão ━━ 10s  = 40s
-Streaming:    Download ━━━━━ 30s
-              Conversão  ━━━━ 10s (paralelo!)            = 30s
+Traditional:  Download ----- 30s -> Convert -- 10s = 40s
+Streaming:    Download ----- 30s
+              Convert  ---- 10s                 = 30s
 ```
 
-Ativar em: Configurações > Pipeline de Streaming > Salvar
+Enable it from:
 
----
+```text
+Settings -> Streaming Pipeline -> Save
+```
 
-## Modo NERD
+## YouTube Cookies
 
-Painel expansível com métricas técnicas detalhadas, dividido em 4 seções:
-
-- **Download Stats** - Chunks, bytes, velocidade, progresso
-- **Conversion Stats** - Codec, bitrate, informações de frame
-- **Transcription Stats** - Palavras/seg, confiança, timing
-- **File System** - Velocidade de disco, padrões de I/O
-
----
-
-## Exportação
-
-| Formato  | Descrição                                     |
-| -------- | --------------------------------------------- |
-| **TXT**  | Texto puro sem timecodes                      |
-| **SRT**  | Legendas com timecodes `HH:MM:SS,mmm`        |
-| **VTT**  | WebVTT com timecodes `HH:MM:SS.mmm`          |
-| **DOCX** | Documento Word formatado com título           |
-| **PDF**  | PDF multi-página com título e parágrafos      |
-
----
-
-## Cookies do YouTube
-
-Necessário quando aparecer:
+Cookies may be required when YouTube returns:
 
 ```text
 ERROR: Sign in to confirm you're not a bot
 ```
 
-### Como exportar (Edge)
+Export cookies from the browser session where YouTube is already logged in,
+then configure the cookies file in the app settings.
 
-1. Instalar [Get cookies.txt LOCALLY](https://microsoftedge.microsoft.com/addons/detail/pdabbpcmapcjfjpkdhpbhcmbflgpjjfp)
-2. Abrir youtube.com (logado)
-3. Extensão > Export
-4. Configurações > Cookies > Selecionar arquivo
+Cookies expire periodically, so repeat the export when downloads start failing
+with authentication or bot-check errors.
 
-> Cookies expiram em ~1-2 semanas
+## Recommended Settings
 
----
+| Setting | Typical value | Notes |
+| --- | --- | --- |
+| Threads | Number of physical CPU cores | Use `0` for automatic behavior when supported |
+| Beam size | `5` | Balanced quality and speed |
+| Best of | `1` | Default fast path |
+| GPU CUDA | Enabled only with a CUDA-enabled `whisper.cpp` build | Leave disabled for CPU builds |
+| Output directory | A user-writable folder | For example `~/Downloads/Transcriptions` on Linux or a user folder on Windows |
 
-## Configuração Recomendada
+Configure these paths in the app instead of hard-coding platform-specific
+defaults:
 
-### Para Intel i7 (4 cores)
-
-| Parâmetro  | Valor      | Razão                              |
-| ---------- | ---------- | ---------------------------------- |
-| Threads    | 4          | 1 por core físico                  |
-| Beam size  | 5          | Equilíbrio qualidade/velocidade    |
-| Best of    | 1          | Padrão                             |
-| GPU CUDA   | Desativado | Só se compilou whisper.cpp com CUDA |
-
-### Caminhos padrão
-
-- **FFmpeg**: `C:\FFMPEG\bin\ffmpeg.exe`
-- **Whisper CLI**: `C:\whisper.cpp\build\bin\Release\whisper-cli.exe`
-- **Modelo**: `C:\whisper.cpp\models\ggml-base.bin`
-- **Saída**: `~/Downloads/Transcricoes`
-
----
+| Path | Example |
+| --- | --- |
+| FFmpeg | `ffmpeg` when available on `PATH`, otherwise the full binary path |
+| Whisper CLI | Full path to `whisper-cli` or `whisper-cli.exe` |
+| Model | Full path to a `ggml-*.bin` model file |
+| Output | Any writable directory for generated audio, video, and transcript files |
 
 ## Troubleshooting
 
-| Problema                              | Solução                                                  |
-| ------------------------------------- | -------------------------------------------------------- |
-| `yt-dlp não encontrado`              | `pip install yt-dlp`                                     |
-| `Sign in to confirm you're not a bot` | Exportar cookies do YouTube                              |
-| `HTTP Error 403`                      | Usar cookies ou VPN                                      |
-| `FFmpeg não encontrado`              | Configurar path correto em Configurações                  |
-| `GPU não funciona`                   | Recompilar whisper.cpp com CUDA ou desmarcar a opção      |
-| `Notificação não aparece`            | `pip install winotify`, testar no app                     |
-| `Ollama não conecta`                 | Verificar se o servidor está rodando (`ollama serve`)     |
-| `Chat sem resposta`                   | Verificar modelo configurado e conexão com Ollama         |
+| Problem | Fix |
+| --- | --- |
+| `yt-dlp` not found | Install dependencies with `python -m pip install -r requirements.txt` |
+| Desktop launcher does not open | Check `/home/elzobrito/.local/bin/youtube-transcriber` and the configured virtual environment path |
+| `customtkinter` not found | Reinstall dependencies in the launcher virtual environment |
+| YouTube asks for sign-in or bot confirmation | Export fresh cookies and configure them in Settings |
+| HTTP 403 | Try fresh cookies, a different network, or a VPN |
+| FFmpeg not found | Install FFmpeg or configure the exact binary path |
+| GPU does not work | Rebuild `whisper.cpp` with the desired GPU backend, or disable GPU mode |
+| Ollama does not connect | Confirm that `ollama serve` is running and the configured model exists |
+| Chat returns no response | Check the Ollama URL, model name, and server logs |
 
----
-
-## Estrutura do Projeto
+## Project Layout
 
 ```text
 youtube-transcriber/
-├── main.py                         # Entry point
-├── database.py                     # SQLite (videos, transcrições, chat, fila, histórico)
-├── config.py                       # Configurações e defaults
-├── gui/
-│   ├── app.py                      # Janela principal e orquestração de abas
-│   ├── tabs/
-│   │   ├── download_tab.py         # Download e transcrição
-│   │   ├── queue_tab.py            # Fila de URLs
-│   │   ├── library_tab.py         # Biblioteca de transcrições
-│   │   ├── chat_tab.py             # Chat IA com Ollama
-│   │   ├── history_tab.py          # Histórico de processamento
-│   │   └── settings_tab.py         # Configurações
-│   ├── widgets/
-│   │   ├── enhanced_log.py         # Log com timestamps e cores
-│   │   ├── stage_progress_panel.py # Progresso em 3 estágios
-│   │   ├── stats_panel.py          # Estatísticas do sistema
-│   │   ├── nerd_panel.py           # Painel NERD (métricas avançadas)
-│   │   ├── pipeline_badge.py       # Badge do modo de pipeline
-│   │   ├── context_menu.py         # Menus de contexto (clique direito)
-│   │   ├── status_flash.py         # Notificações flash temporárias
-│   │   ├── tooltip.py              # Tooltips de hover
-│   │   ├── video_preview.py        # Preview de vídeo
-│   │   ├── search_box.py           # Campo de busca
-│   │   └── progress_bar.py         # Barra de progresso customizada
-│   └── themes/
-│       └── dark_custom.py          # Tema dark (VS Code-inspired)
-├── core/
-│   ├── worker.py                   # Orquestração e threading
-│   ├── downloader.py               # Download via yt-dlp
-│   ├── streaming_downloader.py     # Pipeline paralelo (streaming)
-│   ├── audio.py                    # Extração e normalização de áudio
-│   ├── transcriber.py              # Interface com whisper.cpp
-│   ├── exporter.py                 # Exportação (TXT, SRT, VTT, DOCX, PDF)
-│   ├── ollama_client.py            # Cliente REST para Ollama
-│   ├── translator.py               # Tradução
-│   └── updater.py                  # Atualizações
-├── integrations/
-│   └── notifications.py            # Windows Toast (winotify)
-└── utils/
-    ├── backup.py                   # Backup/restore do banco
-    └── portable.py                 # Modo portátil
+  main.py                         application entry point and CLI URL handling
+  config.py                       settings and defaults
+  database.py                     SQLite storage for videos, transcripts, queue, history, and chat
+  requirements.txt                Python runtime dependencies
+
+  gui/
+    app.py                        main window and tab orchestration
+    tabs/
+      download_tab.py             download and transcription workflow
+      queue_tab.py                URL queue management
+      library_tab.py              completed transcription library
+      chat_tab.py                 Ollama chat window
+      history_tab.py              processing history
+      settings_tab.py             app configuration
+    widgets/                      reusable Tkinter widgets
+    themes/                       custom themes
+
+  core/
+    worker.py                     workflow orchestration and threading
+    downloader.py                 yt-dlp integration
+    streaming_downloader.py       parallel download/conversion pipeline
+    audio.py                      audio extraction and normalization
+    transcriber.py                whisper.cpp integration
+    exporter.py                   TXT, SRT, VTT, DOCX, and PDF export
+    ollama_client.py              Ollama REST client
+    translator.py                 translation helpers
+    updater.py                    update helpers
+
+  integrations/
+    notifications.py              platform notification integration
+
+  utils/
+    backup.py                     database backup and restore
+    portable.py                   portable-mode helpers
 ```
 
----
+## Database
 
-## Banco de Dados
+The app uses SQLite with tables for:
 
-SQLite com as seguintes tabelas:
-
-| Tabela           | Descrição                                                             |
-| ---------------- | --------------------------------------------------------------------- |
-| `settings`       | Configurações chave-valor                                             |
-| `videos`         | Metadados dos vídeos (URL, título, canal, duração, caminhos)         |
-| `transcriptions` | Transcrições com texto, segmentos JSON, hash de áudio, flag de uso    |
-| `translations`   | Traduções de transcrições                                             |
-| `history`        | Histórico de processamento com status e tempo                         |
-| `queue`          | Fila de URLs com prioridade e status                                  |
-| `chat_sessions`  | Sessões de chat com Ollama por transcrição                            |
-| `chat_messages`  | Mensagens individuais de cada sessão (user/assistant)                 |
-
----
+| Table | Purpose |
+| --- | --- |
+| `settings` | Key-value app configuration |
+| `videos` | Video metadata, source URLs, channels, duration, and file paths |
+| `transcriptions` | Transcript text, segment JSON, audio hash, and usage flag |
+| `translations` | Translated transcript text |
+| `history` | Processing attempts, status, and timing |
+| `queue` | Pending and completed queued URLs |
+| `chat_sessions` | Ollama chat sessions per transcription |
+| `chat_messages` | Individual chat messages |
 
 ## Changelog
 
-### v3.0 (2026-02)
+### v3.0
 
-- Chat IA com Ollama (sessões persistentes, streaming, contexto automático)
-- Exportação SRT e VTT com timecodes
-- Menus de contexto em toda a aplicação
-- Tooltips de hover nos botões
-- Notificações flash temporárias (StatusFlash)
-- Log aprimorado com timestamps e cores
-- Flag de uso nas transcrições (marcar como utilizada)
-- Filtro por idioma na Biblioteca
-- Acesso direto a áudio/vídeo originais
-- Detecção de duplicatas por hash de áudio
-- Backup e restore do banco de dados
+- Added Ollama chat sessions with streamed responses and transcript context.
+- Added SRT and VTT export with timecodes.
+- Added context menus, hover tooltips, temporary status flashes, and enhanced logs.
+- Added library usage flags, language filters, and direct access to original
+  audio/video files.
+- Added duplicate detection by audio hash.
+- Added database backup and restore.
 
-### v2.1 (2026-01)
+### v2.1
 
-- Tema Dark customizado (VS Code-inspired)
-- Modo NERD com métricas técnicas detalhadas
-- Notificações Windows Toast com botão de teste
-- Barra de conversão funcional
-- Estatísticas dinâmicas (velocidade realtime)
+- Added a custom dark theme.
+- Added NERD mode with detailed processing metrics.
+- Added notification hooks.
+- Added a functional conversion progress bar.
+- Added real-time performance statistics.
 
 ### v2.0
 
-- Streaming Pipeline (25-35% mais rápido)
-- Suporte a Cookies
-- Auto-detecção yt-dlp
+- Added the streaming pipeline.
+- Added cookies support.
+- Added automatic `yt-dlp` detection.
 
----
-
-## Licença
+## License
 
 MIT
