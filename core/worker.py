@@ -109,6 +109,13 @@ class TranscriberWorker:
         if self.complete:
             self.complete()
 
+        return {
+            "success": sucesso,
+            "failed": falha,
+            "skipped": pulado,
+            "cancelled": self.cancel_requested,
+        }
+
     def _notify(self, title, message, success=True):
         """Envia notificação Windows Toast"""
         notifications_enabled = get_setting("notifications_enabled")
@@ -121,7 +128,7 @@ class TranscriberWorker:
                 if result == True:
                     self.log(f"📢 Notificação enviada: {title}")
                 elif result == False:
-                    self.log("⚠️ Winotify não instalado - notificação ignorada")
+                    self.log("⚠️ Notificações de desktop indisponíveis (winotify/notify-send)")
                 else:
                     self.log("⚠️ Erro ao enviar notificação (result=None)")
             except Exception as e:
