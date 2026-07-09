@@ -12,6 +12,7 @@ from database import (
 )
 from gui.widgets.context_menu import attach_entry_context_menu, attach_treeview_context_menu
 from gui.widgets.tooltip import ToolTip
+from gui.widgets.treeview_style import apply_treeview_row_style
 
 
 class QueueTab(ttk.Frame):
@@ -47,6 +48,7 @@ class QueueTab(ttk.Frame):
         tree_scroll = ttk.Scrollbar(list_frame)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        apply_treeview_row_style(self.app.style)
         self.queue_tree = ttk.Treeview(
             list_frame,
             columns=("url", "status", "data"),

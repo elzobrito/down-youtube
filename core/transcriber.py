@@ -88,8 +88,7 @@ class Transcriber:
             self.last_segments = None
             self._progress("Transcrevendo...")
 
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
+            env = self._build_subprocess_env()
 
             error_path = self._create_temp_error_file()
             with open(error_path, "wb") as err_file:
@@ -192,12 +191,62 @@ class Transcriber:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=self._build_subprocess_env(),
             )
             help_text = (result.stdout or "") + (result.stderr or "")
         except Exception:
             help_text = ""
         self._cli_help_cache[self.cli_path] = help_text
         return help_text
+
+    def _build_subprocess_env(self):
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        library_paths = []
+
+        cli_dir = self._cli_directory()
+        if cli_dir:
+            library_paths.append(str(cli_dir))
+
+        library_paths.extend(self._cuda_library_paths(env))
+
+        current = env.get("LD_LIBRARY_PATH")
+        if current:
+            library_paths.extend(path for path in current.split(os.pathsep) if path)
+
+        if library_paths:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(library_paths))
+
+        return env
+
+    @staticmethod
+    def _cuda_library_paths(env):
+        candidates = []
+
+        for variable in ("CUDA_HOME", "CUDA_PATH"):
+            cuda_root = env.get(variable)
+            if cuda_root:
+                candidates.append(Path(cuda_root).expanduser() / "lib64")
+
+        candidates.extend(
+            [
+                Path("/usr/local/cuda/lib64"),
+                Path.home() / ".local/cuda-12.4/lib64",
+                Path.home() / ".local/cuda-toolkit-12.4/usr/lib/x86_64-linux-gnu",
+            ]
+        )
+
+        return [str(path.resolve()) for path in candidates if path.exists()]
+
+    def _cli_directory(self):
+        if not self.cli_path:
+            return None
+
+        cli_path = Path(str(self.cli_path)).expanduser()
+        if cli_path.parent == Path("."):
+            return None
+        return cli_path.resolve().parent
 
     @staticmethod
     def _create_temp_error_file():

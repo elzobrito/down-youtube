@@ -3,6 +3,8 @@ Tema Dark Customizado para YouTube Transcriber
 Inspirado em VS Code Dark+
 """
 
+from gui.widgets.treeview_style import apply_treeview_row_style
+
 def apply_dark_theme(root, style):
     """
     Aplica tema escuro personalizado ao app
@@ -187,6 +189,9 @@ def apply_dark_theme(root, style):
         ]
     )
     
+    # === TREEVIEW ===
+    apply_treeview_row_style(style)
+
     # === SCROLLBAR ===
     style.configure("Vertical.TScrollbar",
         background=colors['bg_medium'],

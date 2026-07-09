@@ -18,14 +18,16 @@ from gui.tabs.queue_tab import QueueTab
 from gui.tabs.history_tab import HistoryTab
 from gui.tabs.settings_tab import SettingsTab
 from gui.tabs.library_tab import LibraryTab
+from gui.window_geometry import calculate_initial_geometry
+from gui.widgets.treeview_style import apply_treeview_row_style
 
 
 class YouTubeTranscriberApp:
     def __init__(self, root):
         self.root = root
         self.root.title("YouTube Transcriber")
-        self.root.geometry("800x600")
-        self.root.minsize(700, 500)
+        self._set_initial_geometry()
+        self.root.minsize(1000, 650)
 
         init_database()
 
@@ -33,6 +35,7 @@ class YouTubeTranscriberApp:
         theme = get_setting("theme")
         if theme in self.style.theme_names():
             self.style.theme_use(theme)
+        apply_treeview_row_style(self.style)
 
         self.worker = None
         self._create_menu()
@@ -40,6 +43,13 @@ class YouTubeTranscriberApp:
         self._setup_global_shortcuts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Escape>", self._on_escape)
+
+    def _set_initial_geometry(self):
+        geometry = calculate_initial_geometry(
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+        self.root.geometry(geometry)
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)

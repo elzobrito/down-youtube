@@ -5,6 +5,7 @@ from database import get_setting, set_setting
 from utils.backup import backup_database, restore_database
 from gui.widgets.context_menu import attach_entry_context_menu
 from gui.widgets.tooltip import ToolTip
+from gui.widgets.treeview_style import apply_treeview_row_style
 
 
 class SettingsTab(ttk.Frame):
@@ -330,15 +331,18 @@ class SettingsTab(ttk.Frame):
                 self.app.root.title(f"YouTube Transcriber - Erro ao aplicar tema: {e}")
                 # Fallback para tema claro
                 self.style.theme_use('vista')
+                apply_treeview_row_style(self.style)
         else:
             # Tema tkinter nativo
             try:
                 self.style.theme_use(theme)
+                apply_treeview_row_style(self.style)
                 # Resetar Text widgets para cores padrão se voltar de dark
                 self._reset_text_colors()
             except Exception as e:
                 self.app.root.title(f"YouTube Transcriber - Erro: {e}")
                 self.style.theme_use('vista')
+                apply_treeview_row_style(self.style)
     
     def _apply_text_colors_to_app(self, colors):
         """Aplica cores aos widgets Text (não-ttk) recursivamente"""

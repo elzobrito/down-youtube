@@ -22,6 +22,7 @@ from gui.widgets.context_menu import (
 )
 from gui.widgets.status_flash import StatusFlash
 from gui.widgets.tooltip import ToolTip
+from gui.widgets.treeview_style import apply_treeview_row_style
 
 
 class LibraryTab(ttk.Frame):
@@ -66,6 +67,7 @@ class LibraryTab(ttk.Frame):
         paned.add(list_frame, weight=1)
 
         columns = ("titulo", "canal", "palavras", "data", "usado")
+        apply_treeview_row_style(self.app.style)
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
 
         self.tree.heading("titulo", text="Titulo")

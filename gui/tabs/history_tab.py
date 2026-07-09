@@ -7,6 +7,7 @@ from tkinter import ttk, messagebox
 from database import get_history, clear_history
 from gui.widgets.context_menu import attach_treeview_context_menu
 from gui.widgets.tooltip import ToolTip
+from gui.widgets.treeview_style import apply_treeview_row_style
 
 
 def format_datetime_local(value) -> str:
@@ -37,6 +38,7 @@ class HistoryTab(ttk.Frame):
         tree_scroll = ttk.Scrollbar(tree_frame)
         tree_scroll.pack(side="right", fill="y")
 
+        apply_treeview_row_style(self.app.style)
         self.history_tree = ttk.Treeview(
             tree_frame,
             columns=("titulo", "status", "data"),
