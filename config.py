@@ -36,6 +36,10 @@ DEFAULT_SETTINGS = {
     "output_dir": str(Path.home() / "Downloads" / "Transcricoes"),
     "keep_audio": "0",
     "keep_video": "0",
+    # When "1" and keep_video is on: yt-dlp best possible video+audio (may use MKV/AV1/VP9)
+    "video_download_best_quality": "0",
+    # When "1": best audio stream + better clients; if keep_audio, preserve HQ m4a/opus + WAV for Whisper
+    "audio_download_best_quality": "0",
     "whisper_threads": "0",
     "whisper_beam_size": "1",
     "whisper_best_of": "1",

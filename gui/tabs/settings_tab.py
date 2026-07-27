@@ -202,6 +202,40 @@ class SettingsTab(ttk.Frame):
             variable=self.keep_video_var,
         ).pack(anchor=tk.W, pady=(5, 0))
 
+        self.video_best_quality_var = tk.BooleanVar(
+            value=get_setting("video_download_best_quality") == "1"
+        )
+        chk_best = ttk.Checkbutton(
+            options_frame,
+            text="Melhor qualidade de video possivel (yt-dlp bv*+ba; pode gerar MKV/AV1/VP9)",
+            variable=self.video_best_quality_var,
+        )
+        chk_best.pack(anchor=tk.W, pady=(5, 0))
+        ToolTip(
+            chk_best,
+            "Quando ativo e 'Manter video' estiver ligado: baixa o melhor "
+            "par video+audio disponivel (clientes web/tv), merge MKV se "
+            "preciso. Desligado: preset compativel bestvideo+bestaudio em MP4. "
+            "Nao altera o download so-audio da transcricão.",
+        )
+
+        self.audio_best_quality_var = tk.BooleanVar(
+            value=get_setting("audio_download_best_quality") == "1"
+        )
+        chk_audio_best = ttk.Checkbutton(
+            options_frame,
+            text="Melhor qualidade de audio possivel (ba/b + archive HQ se manter audio)",
+            variable=self.audio_best_quality_var,
+        )
+        chk_audio_best.pack(anchor=tk.W, pady=(5, 0))
+        ToolTip(
+            chk_audio_best,
+            "Quando ativo: baixa o melhor stream de audio (ba/b, clients web/tv, "
+            "sort por bitrate). Sempre gera WAV 16 kHz mono para o Whisper. "
+            "Se 'Manter audio' estiver ligado, preserva tambem m4a/opus original. "
+            "Desligado: bestaudio/best + WAV como antes.",
+        )
+
         # Notificações com botão de teste
         notification_frame = ttk.Frame(options_frame)
         notification_frame.pack(anchor=tk.W, pady=(5, 0), fill=tk.X)
@@ -476,6 +510,14 @@ class SettingsTab(ttk.Frame):
         set_setting("whisper_language", self.language_var.get())
         set_setting("keep_audio", "1" if self.keep_audio_var.get() else "0")
         set_setting("keep_video", "1" if self.keep_video_var.get() else "0")
+        set_setting(
+            "video_download_best_quality",
+            "1" if self.video_best_quality_var.get() else "0",
+        )
+        set_setting(
+            "audio_download_best_quality",
+            "1" if self.audio_best_quality_var.get() else "0",
+        )
         set_setting("whisper_threads", self.threads_var.get().strip() or "0")
         set_setting("whisper_beam_size", self.beam_var.get().strip() or "1")
         set_setting("whisper_best_of", self.best_of_var.get().strip() or "1")

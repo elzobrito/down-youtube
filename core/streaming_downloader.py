@@ -34,7 +34,8 @@ class StreamingDownloader:
         url: str, 
         output_dir: str, 
         ffmpeg_path: str = "ffmpeg",
-        cookies_path: Optional[str] = None
+        cookies_path: Optional[str] = None,
+        best_quality: bool = False,
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """
         Download e conversão simultâneos usando pipeline com pipes
@@ -44,6 +45,7 @@ class StreamingDownloader:
             output_dir: Diretório de saída
             ffmpeg_path: Caminho para FFmpeg
             cookies_path: Caminho para arquivo de cookies (opcional)
+            best_quality: usar format/clients de máxima qualidade de áudio
             
         Returns:
             Tuple (caminho_wav, info_dict) ou (None, None) em caso de erro
@@ -68,7 +70,7 @@ class StreamingDownloader:
         output_wav = output_dir / f"{video_id}.wav"
 
         # 2. Construir comandos
-        ytdlp_cmd = self._build_ytdlp_command(url, cookies_path)
+        ytdlp_cmd = self._build_ytdlp_command(url, cookies_path, best_quality=best_quality)
         ffmpeg_cmd = self._build_ffmpeg_command(ffmpeg_path, str(temp_wav))
         
         # Limpar buffers de erro
@@ -305,11 +307,14 @@ class StreamingDownloader:
             
             return None, None
 
-    def _build_ytdlp_command(self, url: str, cookies_path: Optional[str]) -> list:
+    def _build_ytdlp_command(
+        self, url: str, cookies_path: Optional[str], best_quality: bool = False
+    ) -> list:
         """Construir comando yt-dlp para streaming via stdout"""
         import shutil
         import sys
-        
+        from core.downloader import Downloader
+
         # Estratégia 1: Tentar encontrar executável standalone
         ytdlp_exe = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
         
@@ -322,19 +327,25 @@ class StreamingDownloader:
             python_exe = sys.executable
             cmd = [python_exe, "-m", "yt_dlp"]
         
+        fmt = Downloader.audio_format_spec(best_quality)
+        clients = ",".join(Downloader.audio_player_clients(best_quality))
+
         # Adicionar argumentos
         cmd.extend([
-            "--format", "bestaudio/best",
+            "--format", fmt,
             "--output", "-",  # stdout
             "--no-playlist",
             "--progress",  # Mostrar progresso
             "--newline",  # Uma linha por update
             "--no-warnings",
             # Bypass YouTube 403 - mesmas estratégias do modo tradicional
-            "--extractor-args", "youtube:player_client=android,web",
+            "--extractor-args", f"youtube:player_client={clients}",
             "--extractor-retries", "3",
             "--fragment-retries", "3",
         ])
+        if best_quality:
+            # Prefer higher bitrate / sample rate when available
+            cmd.extend(["-S", "abr,asr"])
 
         if cookies_path and os.path.exists(cookies_path):
             cmd.extend(["--cookies", cookies_path])

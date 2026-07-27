@@ -200,6 +200,7 @@ class TranscriberWorker:
         arquivo_wav = None
         video_path = None
         info = None
+        archive_audio = None  # high-quality audio archive (best quality + keep_audio)
         
         use_streaming = cfg.get("use_streaming_pipeline", False) and not cfg["keep_video"]
         
@@ -220,7 +221,11 @@ class TranscriberWorker:
                     logger=self.log
                 )
                 arquivo_wav, info = streaming_dl.download_and_convert_streaming(
-                    url, output_dir, ffmpeg_path, cookies_path
+                    url,
+                    output_dir,
+                    ffmpeg_path,
+                    cookies_path,
+                    best_quality=cfg.get("audio_download_best_quality", False),
                 )
                 
                 if not arquivo_wav:
@@ -235,13 +240,27 @@ class TranscriberWorker:
         # TRADITIONAL PIPELINE: Fallback ou quando keep_video=1
         if not use_streaming or not arquivo_wav:
             if cfg["keep_video"]:
-                video_path, info = downloader.download_video(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
+                video_path, info = downloader.download_video(
+                    url,
+                    output_dir,
+                    ffmpeg_path,
+                    cookies_path=cookies_path,
+                    best_quality=cfg.get("video_download_best_quality", False),
+                )
                 if not video_path:
                     return self._handle_failure(url, downloader.last_error, start_time)
                 
                 arquivo_wav = audio_processor.extract_audio(video_path, output_dir)
             else:
-                arquivo_wav, info = downloader.download_audio(url, output_dir, ffmpeg_path, cookies_path=cookies_path)
+                arquivo_wav, info = downloader.download_audio(
+                    url,
+                    output_dir,
+                    ffmpeg_path,
+                    cookies_path=cookies_path,
+                    best_quality=cfg.get("audio_download_best_quality", False),
+                    keep_archive=cfg.get("keep_audio", False),
+                )
+                archive_audio = downloader.last_archive_audio_path
 
             if arquivo_wav and not cfg["keep_video"]:
                 # Normalize if we just downloaded audio (already extracted by yt-dlp usually, but ensuring 16k mono)
@@ -294,7 +313,11 @@ class TranscriberWorker:
                     "Ja existe transcricao para este video. Reprocessar?",
                 ):
                     self.log("⏭️ Transcricao existente para video. Ignorado.")
-                    self._cleanup(arquivo_wav, cfg["keep_audio"])
+                    self._cleanup(
+                        arquivo_wav,
+                        cfg["keep_audio"],
+                        extra_paths=[archive_audio] if archive_audio else None,
+                    )
                     add_history(
                         video_db_id,
                         "skipped_duplicate",
@@ -314,7 +337,11 @@ class TranscriberWorker:
                 "Este audio ja foi transcrito. Reprocessar mesmo assim?",
             ):
                 self.log("⏭️ Audio duplicado. Ignorado.")
-                self._cleanup(arquivo_wav, cfg["keep_audio"])
+                self._cleanup(
+                    arquivo_wav,
+                    cfg["keep_audio"],
+                    extra_paths=[archive_audio] if archive_audio else None,
+                )
                 add_history(
                     video_db_id,
                     "skipped_duplicate",
@@ -328,7 +355,8 @@ class TranscriberWorker:
         # 7. Transcribe
         return self._run_transcription(
             arquivo_wav, output_dir, video_db_id, audio_hash, start_time, cfg,
-            video_path=video_path if cfg["keep_video"] else None
+            video_path=video_path if cfg["keep_video"] else None,
+            archive_audio=archive_audio,
         )
 
     def processar_arquivo_local(self, file_path):
@@ -406,7 +434,17 @@ class TranscriberWorker:
             video_path=video_path
         )
 
-    def _run_transcription(self, audio_path, output_dir, video_db_id, audio_hash, start_time, cfg, video_path=None):
+    def _run_transcription(
+        self,
+        audio_path,
+        output_dir,
+        video_db_id,
+        audio_hash,
+        start_time,
+        cfg,
+        video_path=None,
+        archive_audio=None,
+    ):
         audio_processor = AudioProcessor(logger=self.log)
         duration = audio_processor.get_wav_duration(audio_path)
         
@@ -495,16 +533,25 @@ class TranscriberWorker:
                 processing_time_seconds=elapsed
             )
 
-        self._cleanup(audio_path, cfg["keep_audio"])
+        self._cleanup(audio_path, cfg["keep_audio"], extra_paths=[archive_audio] if archive_audio else None)
         self.progress("Concluido")
         return "success" if arquivo_txt else "failed"
 
-    def _cleanup(self, audio_path, keep_audio):
-        if not keep_audio and audio_path and os.path.exists(audio_path):
+    def _cleanup(self, audio_path, keep_audio, extra_paths=None):
+        if keep_audio:
+            return
+        paths = []
+        if audio_path:
+            paths.append(audio_path)
+        for extra in extra_paths or []:
+            if extra:
+                paths.append(extra)
+        for path in paths:
             try:
-                os.remove(audio_path)
-                self.log("🗑️ Audio removido")
-            except:
+                if path and os.path.exists(path):
+                    os.remove(path)
+                    self.log(f"🗑️ Audio removido: {os.path.basename(path)}")
+            except Exception:
                 pass
 
     def _handle_failure(self, url, error, start_time, info=None, video_path=None, keep_video=False):
@@ -556,6 +603,8 @@ class TranscriberWorker:
             "output_dir": output_dir,
             "keep_audio": get_setting("keep_audio") == "1",
             "keep_video": get_setting("keep_video") == "1",
+            "video_download_best_quality": get_setting("video_download_best_quality") == "1",
+            "audio_download_best_quality": get_setting("audio_download_best_quality") == "1",
             "whisper_threads": self._get_int_setting("whisper_threads", 0),
             "whisper_beam_size": self._get_int_setting("whisper_beam_size", 1),
             "whisper_best_of": self._get_int_setting("whisper_best_of", 1),

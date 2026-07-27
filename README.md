@@ -69,7 +69,7 @@ Implemented user-facing capabilities:
 | Export | TXT, SRT, VTT, DOCX, and PDF export for selected transcriptions |
 | Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription; LTM retrieval (`remember`) with video vs full-library scope |
 | History | Processing records, status tracking, failed-item reprocessing |
-| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800` |
+| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
 | Long-term memory | `core/rag_bridge.py` projects transcriptions to `rag_corpus/`, indexes via rag-sqlite CLI, manifest lookup for citations, durable index queue |
 | Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
 | Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
@@ -292,6 +292,8 @@ with authentication or bot-check errors.
 | GPU CUDA | Enabled only with a CUDA-enabled `whisper.cpp` build | Leave disabled for CPU builds |
 | Long-audio threshold | `3600` seconds | Split only when longer than 60 min |
 | Chunk length | `1800` seconds | 30-minute Whisper pieces |
+| Best video quality | Off by default | Settings → “Melhor qualidade de video possivel”; with **Manter video**, uses `bv*+ba/b`, richer YouTube clients, merge **MKV** if needed. Off = legacy `bestvideo+bestaudio` → MP4. |
+| Best audio quality | Off by default | Settings → “Melhor qualidade de audio possivel”: `ba/b` + better clients + sort by bitrate. Always builds **WAV 16 kHz mono** for Whisper; with **Manter audio**, also keeps HQ m4a/opus archive. Off = `bestaudio/best` → WAV. |
 | Output directory | A user-writable folder | For example `~/Downloads/Transcriptions` on Linux or a user folder on Windows |
 
 Configure these paths in the app instead of hard-coding platform-specific
