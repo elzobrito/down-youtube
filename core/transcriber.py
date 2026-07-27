@@ -1,8 +1,17 @@
 import os
+import re
 import subprocess
-import time
 import tempfile
+import time
 from pathlib import Path
+
+from core.audio import AudioProcessor
+
+
+# Defaults aligned with config.DEFAULT_SETTINGS
+DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS = 3600.0  # > 60 minutes
+DEFAULT_CHUNK_SECONDS = 1800.0  # 30 minutes
+
 
 class Transcriber:
     _cli_help_cache = {}
@@ -18,7 +27,10 @@ class Transcriber:
         use_gpu=False,
         logger=None,
         progress_callback=None,
-        cancel_check_callback=None
+        cancel_check_callback=None,
+        long_audio_threshold_seconds=DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS,
+        chunk_seconds=DEFAULT_CHUNK_SECONDS,
+        ffmpeg_path="ffmpeg",
     ):
         self.cli_path = cli_path
         self.model_path = model_path
@@ -30,6 +42,9 @@ class Transcriber:
         self.logger = logger
         self.progress_callback = progress_callback
         self.cancel_check = cancel_check_callback or (lambda: False)
+        self.long_audio_threshold_seconds = float(long_audio_threshold_seconds)
+        self.chunk_seconds = float(chunk_seconds)
+        self.ffmpeg_path = ffmpeg_path
         self.last_error = None
         self.last_segments = None
         self._gpu_notice_logged = False
@@ -49,6 +64,189 @@ class Transcriber:
         output_dir = output_dir or str(Path(audio_path).parent)
         os.makedirs(output_dir, exist_ok=True)
 
+        if duration is None:
+            duration = AudioProcessor(ffmpeg_path=self.ffmpeg_path).get_wav_duration(audio_path)
+
+        if AudioProcessor.should_chunk_duration(duration, self.long_audio_threshold_seconds):
+            self._log(
+                f"ℹ️ Áudio longo ({duration:.0f}s > {self.long_audio_threshold_seconds:.0f}s): "
+                f"transcrição em pedaços de {self.chunk_seconds:.0f}s."
+            )
+            return self._transcribe_chunked(audio_path, output_dir, duration)
+
+        return self._transcribe_single(audio_path, output_dir, duration=duration)
+
+    def _transcribe_chunked(self, audio_path, output_dir, duration):
+        """Split long audio, transcribe each piece, merge TXT/SRT with time offsets."""
+        self.last_error = None
+        self.last_segments = None
+        audio_processor = AudioProcessor(
+            ffmpeg_path=self.ffmpeg_path,
+            logger=self.logger,
+            progress_callback=self.progress_callback,
+        )
+        temp_dir = tempfile.mkdtemp(prefix="yt_whisper_chunks_")
+        chunk_paths = []
+        try:
+            if self.cancel_check():
+                self.last_error = "Processamento cancelado"
+                return None
+
+            chunks = audio_processor.split_wav_into_chunks(
+                audio_path,
+                chunk_seconds=self.chunk_seconds,
+                output_dir=temp_dir,
+                prefix=Path(audio_path).stem + "_part",
+            )
+            if not chunks:
+                self.last_error = "Falha ao fatiar audio longo"
+                self._log(f"❌ {self.last_error}")
+                return None
+
+            chunk_paths = [c["path"] for c in chunks]
+            n = len(chunks)
+            self._log(f"ℹ️ {n} pedaço(s) de até {self.chunk_seconds:.0f}s para Whisper.")
+
+            merged_segments = []
+            txt_parts = []
+            srt_blocks = []
+            cue_index = 1
+            wall_start = time.perf_counter()
+
+            for chunk in chunks:
+                if self.cancel_check():
+                    self.last_error = "Processamento cancelado"
+                    return None
+
+                idx = chunk["index"]
+                offset = float(chunk["start"])
+                chunk_duration = float(chunk["length"])
+                self._progress(
+                    {
+                        "stage": "transcription",
+                        "percent": int((idx / n) * 100),
+                        "elapsed": self._format_elapsed(time.perf_counter() - wall_start),
+                        "message": f"Pedaço {idx + 1}/{n}",
+                    }
+                )
+
+                # Capture outer callback BEFORE wrapping. Calling self._progress from
+                # the wrapper would re-enter the wrapper (infinite recursion).
+                original_cb = self.progress_callback
+
+                def _chunk_progress(data, _idx=idx, _n=n, _start=wall_start, _orig=original_cb):
+                    if not isinstance(data, dict):
+                        if _orig:
+                            _orig(data)
+                        return
+                    local = data.get("percent") or 0
+                    try:
+                        local = float(local)
+                    except (TypeError, ValueError):
+                        local = 0
+                    overall = int(((_idx + local / 100.0) / _n) * 100)
+                    payload = dict(data)
+                    payload["percent"] = min(99, max(0, overall))
+                    payload["elapsed"] = self._format_elapsed(time.perf_counter() - _start)
+                    payload["message"] = f"Pedaço {_idx + 1}/{_n}"
+                    if _orig:
+                        _orig(payload)
+
+                self.progress_callback = _chunk_progress
+                try:
+                    txt_path = self._transcribe_single(
+                        chunk["path"],
+                        output_dir=temp_dir,
+                        duration=chunk_duration,
+                        set_segments=False,
+                    )
+                finally:
+                    self.progress_callback = original_cb
+
+                if not txt_path or self.cancel_check():
+                    if not self.last_error:
+                        self.last_error = f"Falha na transcricao do pedaco {idx + 1}/{n}"
+                    return None
+
+                text = self._read_text(txt_path)
+                if text:
+                    txt_parts.append(text.strip())
+
+                srt_path = self._srt_path_for_txt(txt_path)
+                if srt_path and srt_path.exists():
+                    shifted = self._shift_srt_content(self._read_text(srt_path), offset)
+                    blocks, next_index = self._renumber_srt_blocks(shifted, cue_index)
+                    srt_blocks.extend(blocks)
+                    cue_index = next_index
+                    for seg in self._parse_srt(shifted) or []:
+                        merged_segments.append(seg)
+                elif text:
+                    # Fallback segment without fine timing
+                    merged_segments.append(
+                        {
+                            "start": offset,
+                            "end": offset + chunk_duration,
+                            "text": text.strip(),
+                        }
+                    )
+
+            if self.cancel_check():
+                self.last_error = "Processamento cancelado"
+                return None
+
+            final_txt = self._final_txt_path(audio_path)
+            final_srt = self._final_srt_path(audio_path)
+            # Prefer writing beside the source audio (same as single-pass whisper layout)
+            final_txt.parent.mkdir(parents=True, exist_ok=True)
+
+            full_text = "\n".join(part for part in txt_parts if part).strip() + ("\n" if txt_parts else "")
+            final_txt.write_text(full_text, encoding="utf-8")
+
+            srt_body = "\n\n".join(srt_blocks).strip() + ("\n" if srt_blocks else "")
+            final_srt.write_text(srt_body, encoding="utf-8")
+
+            # Also place copies in output_dir when it differs from the audio folder
+            out_dir = Path(output_dir)
+            if out_dir.resolve() != final_txt.parent.resolve():
+                out_txt = out_dir / final_txt.name
+                out_srt = out_dir / final_srt.name
+                out_txt.write_text(full_text, encoding="utf-8")
+                out_srt.write_text(srt_body, encoding="utf-8")
+                final_txt = out_txt
+
+            self.last_segments = merged_segments or None
+            self._progress(
+                {
+                    "stage": "transcription",
+                    "percent": 100,
+                    "elapsed": self._format_elapsed(time.perf_counter() - wall_start),
+                    "message": f"{n} pedaços mesclados",
+                }
+            )
+            self._log(f"✅ Transcrição longa mesclada: {final_txt}")
+            return str(final_txt)
+        except Exception as exc:
+            self.last_error = str(exc)
+            self._log(f"❌ Erro na transcricao chunked: {exc}")
+            return None
+        finally:
+            AudioProcessor.cleanup_chunk_artifacts(chunk_paths)
+            try:
+                # remove any leftover files in temp_dir then the dir
+                for leftover in Path(temp_dir).glob("*"):
+                    try:
+                        leftover.unlink()
+                    except Exception:
+                        pass
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+
+    def _transcribe_single(self, audio_path, output_dir=None, duration=None, set_segments=True):
+        """Run whisper-cli once on a single audio file. Returns path to .txt or None."""
+        output_dir = output_dir or str(Path(audio_path).parent)
+        os.makedirs(output_dir, exist_ok=True)
+
         comando = [
             self.cli_path,
             "-f",
@@ -64,7 +262,6 @@ class Transcriber:
         if self.threads and self.threads > 0:
             comando.extend(["-t", str(self.threads)])
         else:
-            # Default to CPU count if 0
             comando.extend(["-t", str(os.cpu_count() or 1)])
 
         if self.beam_size and self.beam_size > 0:
@@ -85,7 +282,8 @@ class Transcriber:
 
         try:
             self.last_error = None
-            self.last_segments = None
+            if set_segments:
+                self.last_segments = None
             self._progress("Transcrevendo...")
 
             env = self._build_subprocess_env()
@@ -130,15 +328,11 @@ class Transcriber:
                         "elapsed": self._format_elapsed(time.perf_counter() - start_time),
                     }
                 )
-                arquivo_txt = Path(audio_path).with_suffix(".wav.txt")
-                if arquivo_txt.exists():
-                    self.last_segments = self._load_segments_for(arquivo_txt)
+                arquivo_txt = self._find_output_txt(audio_path, output_dir)
+                if arquivo_txt:
+                    if set_segments:
+                        self.last_segments = self._load_segments_for(arquivo_txt)
                     return str(arquivo_txt)
-
-                alternative_txt = Path(audio_path).with_suffix(".txt")
-                if alternative_txt.exists():
-                    self.last_segments = self._load_segments_for(alternative_txt)
-                    return str(alternative_txt)
 
                 self._log_transcription_error(
                     "Arquivo de saida nao encontrado",
@@ -164,10 +358,112 @@ class Transcriber:
             self._log(f"❌ Erro na transcricao: {exc}")
             return None
 
+    def _find_output_txt(self, audio_path, output_dir):
+        candidates = [
+            Path(audio_path).with_suffix(".wav.txt") if Path(audio_path).suffix == ".wav" else None,
+            Path(str(audio_path) + ".txt"),
+            Path(audio_path).with_suffix(".txt"),
+            Path(output_dir) / (Path(audio_path).name + ".txt"),
+            Path(output_dir) / Path(audio_path).with_suffix(".wav.txt").name,
+            Path(output_dir) / Path(audio_path).with_suffix(".txt").name,
+        ]
+        for candidate in candidates:
+            if candidate is not None and candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _final_txt_path(audio_path):
+        path = Path(audio_path)
+        if path.suffix == ".wav":
+            return Path(str(path) + ".txt")  # file.wav.txt
+        return path.with_suffix(".txt")
+
+    @staticmethod
+    def _final_srt_path(audio_path):
+        path = Path(audio_path)
+        if path.suffix == ".wav":
+            return Path(str(path) + ".srt")  # file.wav.srt
+        return path.with_suffix(".srt")
+
+    @staticmethod
+    def _srt_path_for_txt(txt_path):
+        txt_path = Path(txt_path)
+        name = str(txt_path)
+        if name.endswith(".txt"):
+            return Path(name[:-4] + ".srt")
+        return txt_path.with_suffix(".srt")
+
+    @staticmethod
+    def _read_text(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _seconds_to_srt_time(seconds):
+        if seconds is None or seconds < 0:
+            seconds = 0.0
+        total_ms = int(round(float(seconds) * 1000.0))
+        hours, rem = divmod(total_ms, 3600 * 1000)
+        minutes, rem = divmod(rem, 60 * 1000)
+        secs, millis = divmod(rem, 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+    @classmethod
+    def _shift_srt_content(cls, content, offset_seconds):
+        if not content or not content.strip():
+            return ""
+        offset = float(offset_seconds or 0.0)
+        lines = content.replace("\r\n", "\n").split("\n")
+        out = []
+        time_re = re.compile(
+            r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})"
+        )
+        for line in lines:
+            match = time_re.match(line.strip())
+            if match:
+                start = cls._srt_time_to_seconds(match.group(1)) + offset
+                end = cls._srt_time_to_seconds(match.group(2)) + offset
+                out.append(
+                    f"{cls._seconds_to_srt_time(start)} --> {cls._seconds_to_srt_time(end)}"
+                )
+            else:
+                out.append(line)
+        return "\n".join(out)
+
+    @staticmethod
+    def _renumber_srt_blocks(content, start_index=1):
+        """Return (list_of_block_strings, next_index)."""
+        blocks = []
+        index = start_index
+        raw = content.replace("\r\n", "\n").strip()
+        if not raw:
+            return blocks, index
+        for block in raw.split("\n\n"):
+            lines = [line for line in block.split("\n") if line.strip() != "" or True]
+            # drop empty-only blocks
+            nonempty = [line for line in block.split("\n") if line.strip()]
+            if len(nonempty) < 2:
+                continue
+            timing_idx = 1 if len(nonempty) > 1 and "-->" in nonempty[1] else (
+                0 if "-->" in nonempty[0] else -1
+            )
+            if timing_idx == -1:
+                continue
+            timing = nonempty[timing_idx]
+            text_lines = nonempty[timing_idx + 1 :]
+            if not text_lines:
+                continue
+            block_text = f"{index}\n{timing}\n" + "\n".join(text_lines)
+            blocks.append(block_text)
+            index += 1
+        return blocks, index
+
     def _cli_supports_option(self, option):
         help_text = self._get_cli_help()
-        # Simple check if option is in help text
-        # Improve parsing if needed, but this is usually sufficient and matches original logic
         options = set()
         for line in help_text.splitlines():
             line = line.strip()
@@ -280,7 +576,11 @@ class Transcriber:
 
     @staticmethod
     def _load_segments_for(txt_path):
-        srt_path = Path(str(txt_path)[:-4] + ".srt") if str(txt_path).endswith(".txt") else Path(txt_path).with_suffix(".srt")
+        srt_path = (
+            Path(str(txt_path)[:-4] + ".srt")
+            if str(txt_path).endswith(".txt")
+            else Path(txt_path).with_suffix(".srt")
+        )
         if not srt_path.exists():
             return None
         try:
@@ -304,12 +604,14 @@ class Transcriber:
                 start_str, end_str = [part.strip() for part in lines[timing_idx].split("-->")]
             except ValueError:
                 continue
-            text = " ".join(lines[timing_idx + 1:]).strip()
-            segments.append({
-                "start": Transcriber._srt_time_to_seconds(start_str),
-                "end": Transcriber._srt_time_to_seconds(end_str),
-                "text": text,
-            })
+            text = " ".join(lines[timing_idx + 1 :]).strip()
+            segments.append(
+                {
+                    "start": Transcriber._srt_time_to_seconds(start_str),
+                    "end": Transcriber._srt_time_to_seconds(end_str),
+                    "text": text,
+                }
+            )
         return segments or None
 
     @staticmethod

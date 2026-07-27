@@ -1,0 +1,54 @@
+# Runtime / portable data (never commit user corpora or DBs)
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.bak-*
+*.meta.json
+
+# RAG projections under any path
+rag_corpus/
+**/rag_manifest.jsonl
+**/rag_index_queue.jsonl
+**/rag_backfill_report.json
+**/rag_writer.lock
+**/rag_backup_meta.json
+youtube_rag.sqlite
+
+# Python
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# ESAA runtime projections / event store (keep contracts & schemas tracked)
+.roadmap/activity.jsonl
+.roadmap/activity.jsonl.lock
+.roadmap/issues.json
+.roadmap/lessons.json
+.roadmap/roadmap.json
+.roadmap/artifacts/
+.roadmap/backups/
+.roadmap/inbox/
+.roadmap/snapshots/
+.roadmap/*.bak*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Portable marker may be local
+# portable.flag is optional to keep; leave unignored if intentional
+
+# Local plans scratch (keep docs/plans in git)
+*.log

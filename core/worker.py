@@ -44,9 +44,31 @@ class TranscriberWorker:
     def cancelar(self):
         self.cancel_requested = True
 
-    def processar_lista(self, urls):
+    def processar_lista(self, urls, expand_watch_list=False):
         self.running = True
         self.cancel_requested = False
+
+        # Expand playlists into individual watch URLs; keep noplaylist on each download
+        from core.url_resolver import expand_input_urls
+
+        cookies_path = None
+        try:
+            cfg0 = self._get_current_config()
+            cookies_path = cfg0.get("cookies_path")
+        except Exception:
+            cookies_path = None
+
+        original_count = len(urls)
+        urls = expand_input_urls(
+            urls,
+            expand_watch_list=expand_watch_list,
+            cookies_path=cookies_path,
+            logger=self.log,
+        )
+        if len(urls) != original_count:
+            self.log(
+                f"📋 Entrada expandida: {original_count} item(ns) → {len(urls)} job(s) de vídeo"
+            )
 
         total = len(urls)
         sucesso = 0
@@ -407,7 +429,12 @@ class TranscriberWorker:
             use_gpu=cfg["whisper_use_gpu"],
             logger=self.log,
             progress_callback=self._update_progress,
-            cancel_check_callback=lambda: self.cancel_requested
+            cancel_check_callback=lambda: self.cancel_requested,
+            long_audio_threshold_seconds=cfg.get(
+                "whisper_long_audio_threshold_seconds", 3600
+            ),
+            chunk_seconds=cfg.get("whisper_chunk_seconds", 1800),
+            ffmpeg_path=cfg.get("ffmpeg_path") or "ffmpeg",
         )
         
         # Enviar dados NERD de transcrição
@@ -533,6 +560,10 @@ class TranscriberWorker:
             "whisper_beam_size": self._get_int_setting("whisper_beam_size", 1),
             "whisper_best_of": self._get_int_setting("whisper_best_of", 1),
             "whisper_use_gpu": get_setting("whisper_use_gpu") == "1",
+            "whisper_long_audio_threshold_seconds": self._get_int_setting(
+                "whisper_long_audio_threshold_seconds", 3600
+            ),
+            "whisper_chunk_seconds": self._get_int_setting("whisper_chunk_seconds", 1800),
             "use_streaming_pipeline": get_setting("use_streaming_pipeline") == "1",
             "cookies_path": str(cookies_path) if cookies_path else None,
         }

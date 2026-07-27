@@ -12,24 +12,46 @@ cross-platform Tkinter interface.
 In one line:
 
 ```text
-URL or media file -> Download/convert -> Transcribe -> Review/export/chat
+URL (video or playlist) or media file
+  -> Expand playlist if needed
+  -> Download/convert
+  -> Transcribe (chunk long audio)
+  -> Review / export / chat / long-term memory
 ```
+
+### Playlists vs single videos
+
+| URL shape | Behavior |
+| --- | --- |
+| `youtube.com/watch?v=ID` | One job for that video |
+| `youtube.com/playlist?list=PL…` | Expanded with yt-dlp flat playlist → **N** watch URLs, processed one by one |
+| `youtube.com/watch?v=ID&list=PL…` | **Default:** only that video (`list=` is context). UI can offer expanding the full playlist |
+| Per-item download | Still uses yt-dlp `noplaylist` so each job is a single video |
+
+Implementation: `core/url_resolver.py` (classify + expand); worker / Download / Queue / CLI all use the same expansion.
 
 ## At A Glance
 
 - Runs on Windows and Linux with the same Python entry point.
 - Downloads YouTube audio or video through `yt-dlp`, with cookies support for
-  restricted sessions.
+  restricted sessions; accepts single videos and playlists.
 - Processes local audio/video files without requiring a YouTube URL.
 - Transcribes locally through `whisper.cpp`, using CPU or GPU builds depending
   on the installed backend.
+- **Long audio (>60 minutes)** is automatically split into **30-minute chunks**,
+  transcribed per piece, then merged with corrected SRT/TXT timestamps (reduces
+  end-of-file Whisper hallucination loops on long interviews).
 - Stores history, queues, settings, transcriptions, translations, and chat
   sessions in SQLite.
+- Builds an optional **long-term memory** projection via
+  [rag-sqlite](https://github.com/elzobrito/rag-sqlite) (`youtube_rag.sqlite` +
+  `rag_corpus/`) for retrieval-augmented chat across the library.
 - Exports transcripts as TXT, SRT, VTT, DOCX, and PDF.
 - Provides an optional Ollama chat window for asking questions about completed
-  transcriptions.
+  transcriptions (with LTM `remember` scope: current video or full library).
 - Includes a streaming pipeline that overlaps download and conversion work,
   plus traditional and keep-video modes.
+- SQLite backup/restore uses the Online Backup API + integrity check + SHA-256.
 
 ## Feature Inventory
 
@@ -37,21 +59,22 @@ Implemented user-facing capabilities:
 
 | Area | Available functions |
 | --- | --- |
-| Input | YouTube URL processing, local audio/video file processing, clipboard URL detection, CLI URL arguments, URL list files |
+| Input | YouTube URL processing (single video **or playlist**), local audio/video file processing, clipboard URL detection, CLI URL arguments, URL list files |
 | Download | `yt-dlp` audio download, video download when keeping MP4, cookies file support, progress hooks, automatic fallback from streaming to traditional mode |
 | Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
-| Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash |
+| Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash; **long audio (>60 min) → 30 min chunks**, merge with timestamp offsets, cancel/progress across chunks |
 | Queue | Add URLs, import `.txt` lists, process pending/failed items, retry count tracking, remove selected items, clear queue |
 | Library | Full-text search, language filter, preview pane, open full transcript, copy text, delete transcript, mark/unmark as used |
 | Media access | Open saved audio or video files through the operating system |
 | Export | TXT, SRT, VTT, DOCX, and PDF export for selected transcriptions |
-| Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription |
+| Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription; LTM retrieval (`remember`) with video vs full-library scope |
 | History | Processing records, status tracking, failed-item reprocessing |
-| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model |
+| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800` |
+| Long-term memory | `core/rag_bridge.py` projects transcriptions to `rag_corpus/`, indexes via rag-sqlite CLI, manifest lookup for citations, durable index queue |
 | Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
 | Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
-| Data safety | SQLite backup and restore from the Settings tab |
-| Portability | Portable-mode helpers through `portable.flag` |
+| Data safety | SQLite backup/restore via Online Backup API + `quick_check` + SHA-256 (Settings tab) |
+| Portability | Portable-mode helpers through `portable.flag`; `.gitignore` excludes `data/`, sqlite, corpus |
 
 Present in the codebase but not fully wired into the current UI:
 
@@ -65,8 +88,8 @@ Present in the codebase but not fully wired into the current UI:
 ## Quickstart
 
 ```bash
-git clone https://github.com/seu-usuario/youtube-transcriber.git
-cd youtube-transcriber
+git clone https://github.com/elzobrito/down-youtube.git
+cd down-youtube
 python -m venv .venv
 ```
 
@@ -202,6 +225,32 @@ Useful shortcuts:
 | `Escape` | Cancel or clear the current field |
 | `Ctrl+L` | Focus the URL field |
 
+## Long audio (chunked transcription)
+
+Whisper models often **hallucinate repetitive text** near the end of very long
+files (for example multi-hour interviews). To reduce that failure mode:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `whisper_long_audio_threshold_seconds` | `3600` | Only audios **longer than 60 minutes** are split |
+| `whisper_chunk_seconds` | `1800` | Each piece is at most **30 minutes** |
+
+Pipeline:
+
+```text
+duration > 60 min
+  -> split WAV into N chunks of ≤30 min (pure wave I/O)
+  -> whisper-cli once per chunk
+  -> merge TXT + SRT with time offsets (chunk_i * 30 min)
+  -> delete temporary chunk files
+```
+
+Audios **≤ 60 minutes** keep a single Whisper pass (no split).
+
+Progress shows `Pedaço i/N`. Cancel stops the current chunk and cleans temps.
+Chunked mode is wired from `core/worker.py` via `core/transcriber.py` and
+`core/audio.py`.
+
 ## Streaming Pipeline
 
 The streaming pipeline overlaps download and conversion work to reduce total
@@ -241,6 +290,8 @@ with authentication or bot-check errors.
 | Beam size | `5` | Balanced quality and speed |
 | Best of | `1` | Default fast path |
 | GPU CUDA | Enabled only with a CUDA-enabled `whisper.cpp` build | Leave disabled for CPU builds |
+| Long-audio threshold | `3600` seconds | Split only when longer than 60 min |
+| Chunk length | `1800` seconds | 30-minute Whisper pieces |
 | Output directory | A user-writable folder | For example `~/Downloads/Transcriptions` on Linux or a user folder on Windows |
 
 Configure these paths in the app instead of hard-coding platform-specific
@@ -266,15 +317,34 @@ defaults:
 | GPU does not work | Rebuild `whisper.cpp` with the desired GPU backend, or disable GPU mode |
 | Ollama does not connect | Confirm that `ollama serve` is running and the configured model exists |
 | Chat returns no response | Check the Ollama URL, model name, and server logs |
+| Transcript ends with endless repeated phrases | Enable chunking (defaults on for >60 min) and reprocess; use a better Whisper model if ASR quality is still poor |
+| `maximum recursion depth exceeded` on long audio | Fixed in current tree: chunk progress must not re-enter the progress callback; pull latest `core/transcriber.py` |
+| Playlist only processes one video | Use a pure `playlist?list=` URL, or enable expand for `watch?v=&list=`; each item still downloads with `noplaylist` |
+
+## Long-term memory (optional)
+
+After transcriptions are saved, the app can project text into a local RAG index
+for library-wide questions:
+
+```bash
+# smoke against the user RAG DB (default path under ~/.youtube_transcriber)
+./scripts/memory_smoke.sh "your question"
+```
+
+See `docs/guides/youtube-long-term-memory.md` and
+`docs/plans/PLAN-youtube-ltm-rag.md` for architecture, env vars
+(`RAG_SQLITE_DB`), and acceptance notes. Requires the `rag-sqlite` CLI on
+`PATH` (or configured under Settings).
 
 ## Project Layout
 
 ```text
-youtube-transcriber/
+down-youtube/
   main.py                         application entry point and CLI URL handling
-  config.py                       settings and defaults
+  config.py                       settings and defaults (incl. long-audio / RAG)
   database.py                     SQLite storage for videos, transcripts, queue, history, and chat
   requirements.txt                Python runtime dependencies
+  AGENTS.md                       ESAA agent contract (optional local governance)
 
   gui/
     app.py                        main window and tab orchestration
@@ -282,18 +352,20 @@ youtube-transcriber/
       download_tab.py             download and transcription workflow
       queue_tab.py                URL queue management
       library_tab.py              completed transcription library
-      chat_tab.py                 Ollama chat window
+      chat_tab.py                 Ollama chat + LTM remember
       history_tab.py              processing history
-      settings_tab.py             app configuration
+      settings_tab.py             app configuration + memory ops
     widgets/                      reusable Tkinter widgets
     themes/                       custom themes
 
   core/
     worker.py                     workflow orchestration and threading
+    url_resolver.py               playlist vs single-video classification/expand
     downloader.py                 yt-dlp integration
     streaming_downloader.py       parallel download/conversion pipeline
-    audio.py                      audio extraction and normalization
-    transcriber.py                whisper.cpp integration
+    audio.py                      audio extract/normalize + long-audio split
+    transcriber.py                whisper.cpp integration + chunked merge
+    rag_bridge.py                 project/index transcriptions for rag-sqlite
     exporter.py                   TXT, SRT, VTT, DOCX, and PDF export
     ollama_client.py              Ollama REST client
     translator.py                 translation helpers
@@ -303,8 +375,21 @@ youtube-transcriber/
     notifications.py              platform notification integration
 
   utils/
-    backup.py                     database backup and restore
+    backup.py                     SQLite Online Backup API + hash
     portable.py                   portable-mode helpers
+
+  docs/
+    guides/                       operator guides (LTM, …)
+    plans/                        design/plan docs
+
+  scripts/
+    memory_smoke.sh               health/stats/query smoke for YouTube RAG
+
+  tests/
+    test_transcriber_chunk.py     long-audio split/merge/cancel
+    test_playlist_url.py          playlist expansion
+    test_rag_bridge.py            LTM bridge
+    …
 ```
 
 ## Database

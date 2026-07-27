@@ -261,6 +261,66 @@ class SettingsTab(ttk.Frame):
             row=1, column=1, sticky=tk.W, padx=5, pady=5
         )
 
+        memory_frame = ttk.LabelFrame(
+            scrollable_frame, text="Memoria de longo prazo (rag-sqlite)", padding=15
+        )
+        memory_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        self.rag_enabled_var = tk.BooleanVar(value=get_setting("rag_enabled") != "0")
+        ttk.Checkbutton(
+            memory_frame,
+            text="Habilitar memoria LTM",
+            variable=self.rag_enabled_var,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=3)
+
+        ttk.Label(memory_frame, text="Provider embed:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.rag_provider_var = tk.StringVar(
+            value=get_setting("rag_embedding_provider") or "hash"
+        )
+        ttk.Combobox(
+            memory_frame,
+            textvariable=self.rag_provider_var,
+            values=["hash", "ollama"],
+            state="readonly",
+            width=12,
+        ).grid(row=1, column=1, sticky=tk.W, padx=5, pady=3)
+
+        ttk.Label(memory_frame, text="Modelo embed:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        self.rag_model_var = tk.StringVar(
+            value=get_setting("rag_embedding_model") or "embeddinggemma"
+        )
+        ttk.Entry(memory_frame, textvariable=self.rag_model_var, width=24).grid(
+            row=2, column=1, sticky=tk.W, padx=5, pady=3
+        )
+
+        ttk.Label(memory_frame, text="CLI rag-sqlite:").grid(row=3, column=0, sticky=tk.W, pady=3)
+        self.rag_cli_var = tk.StringVar(value=get_setting("rag_sqlite_cli") or "rag-sqlite")
+        ttk.Entry(memory_frame, textvariable=self.rag_cli_var, width=24).grid(
+            row=3, column=1, sticky=tk.W, padx=5, pady=3
+        )
+
+        mem_btns = ttk.Frame(memory_frame)
+        mem_btns.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=8)
+        btn_health = ttk.Button(mem_btns, text="Health", command=self._rag_health)
+        btn_health.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(btn_health, "rag-sqlite health na base youtube_rag.sqlite")
+        btn_backfill = ttk.Button(
+            mem_btns, text="Backfill / Reindex", command=self._rag_backfill
+        )
+        btn_backfill.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(btn_backfill, "Projetar e indexar todas as transcricoes com texto")
+        btn_reconcile = ttk.Button(mem_btns, text="Reconciliar", command=self._rag_reconcile)
+        btn_reconcile.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(btn_reconcile, "Corrigir drift entre app DB e RAG + processar fila")
+        btn_prune = ttk.Button(mem_btns, text="Prune orfaos", command=self._rag_prune)
+        btn_prune.pack(side=tk.LEFT)
+        ToolTip(btn_prune, "Remove do RAG o que nao existe mais no app")
+
+        self.rag_status_var = tk.StringVar(value="Memoria: —")
+        ttk.Label(memory_frame, textvariable=self.rag_status_var, wraplength=520).grid(
+            row=5, column=0, columnspan=2, sticky=tk.W, pady=4
+        )
+
         backup_frame = ttk.LabelFrame(scrollable_frame, text="Backup", padding=15)
         backup_frame.pack(fill=tk.X, padx=10, pady=10)
 
@@ -425,6 +485,10 @@ class SettingsTab(ttk.Frame):
         set_setting("use_streaming_pipeline", "1" if self.streaming_var.get() else "0")
         set_setting("ollama_url", self.ollama_url_var.get())
         set_setting("ollama_model", self.ollama_model_var.get())
+        set_setting("rag_enabled", "1" if self.rag_enabled_var.get() else "0")
+        set_setting("rag_embedding_provider", self.rag_provider_var.get().strip() or "hash")
+        set_setting("rag_embedding_model", self.rag_model_var.get().strip() or "embeddinggemma")
+        set_setting("rag_sqlite_cli", self.rag_cli_var.get().strip() or "rag-sqlite")
 
         messagebox.showinfo("Sucesso", "Configuracoes salvas!")
     
@@ -525,8 +589,14 @@ class SettingsTab(ttk.Frame):
         destination = filedialog.askdirectory()
         if not destination:
             return
-        target = backup_database(destination)
-        messagebox.showinfo("Sucesso", f"Backup criado em: {target}")
+        try:
+            target = backup_database(destination)
+            messagebox.showinfo(
+                "Sucesso",
+                f"Backup criado (API SQLite + quick_check + hash):\n{target}",
+            )
+        except Exception as exc:
+            messagebox.showerror("Erro no backup", str(exc))
 
     def _restore_database(self):
         backup_path = filedialog.askopenfilename(
@@ -534,5 +604,94 @@ class SettingsTab(ttk.Frame):
         )
         if not backup_path:
             return
-        restore_database(backup_path)
-        messagebox.showinfo("Sucesso", "Backup restaurado.")
+        try:
+            restore_database(backup_path)
+            messagebox.showinfo("Sucesso", "Backup restaurado.")
+        except Exception as exc:
+            messagebox.showerror("Erro no restore", str(exc))
+
+    def _rag_health(self):
+        import threading
+
+        def work():
+            try:
+                from core import rag_bridge
+
+                h = rag_bridge.health()
+                s = rag_bridge.stats()
+                msg = (
+                    f"health ok={h.get('ok')} | docs={s.get('documents')} "
+                    f"chunks={s.get('chunks')} fingerprint={(s.get('index_fingerprint') or '')[:12]}…"
+                )
+                self.after(0, lambda: self.rag_status_var.set(msg))
+            except Exception as exc:
+                self.after(0, lambda: self.rag_status_var.set(f"Erro health: {exc}"))
+
+        self.rag_status_var.set("Memoria: checando health…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rag_backfill(self):
+        import threading
+
+        if not messagebox.askyesno(
+            "Backfill",
+            "Indexar todas as transcricoes com texto na base RAG?\n"
+            "Faz backup seguro do app DB antes.",
+        ):
+            return
+
+        def work():
+            try:
+                from core import rag_bridge
+
+                report = rag_bridge.backfill_all_transcriptions(force=False, backup_first=True)
+                eq = report.get("set_equal")
+                n = len(report.get("S_app") or [])
+                err = len(report.get("errors") or [])
+                msg = f"Backfill: |S_app|={n} set_equal={eq} errors={err}"
+                self.after(0, lambda: self.rag_status_var.set(msg))
+                self.after(
+                    0,
+                    lambda: messagebox.showinfo("Backfill", msg),
+                )
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("Backfill", str(exc)))
+
+        self.rag_status_var.set("Memoria: backfill em andamento…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rag_reconcile(self):
+        import threading
+
+        def work():
+            try:
+                from core import rag_bridge
+
+                report = rag_bridge.reconcile()
+                msg = f"Reconcile set_equal={report.get('set_equal')}"
+                self.after(0, lambda: self.rag_status_var.set(msg))
+            except Exception as exc:
+                self.after(0, lambda: self.rag_status_var.set(f"Erro reconcile: {exc}"))
+
+        self.rag_status_var.set("Memoria: reconciliando…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rag_prune(self):
+        import threading
+
+        def work():
+            try:
+                from core import rag_bridge
+
+                out = rag_bridge.index_library(prune=True, force=False)
+                self.after(
+                    0,
+                    lambda: self.rag_status_var.set(
+                        f"Prune/index_library count={out.get('count')}"
+                    ),
+                )
+            except Exception as exc:
+                self.after(0, lambda: self.rag_status_var.set(f"Erro prune: {exc}"))
+
+        self.rag_status_var.set("Memoria: prune…")
+        threading.Thread(target=work, daemon=True).start()

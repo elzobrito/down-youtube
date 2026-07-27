@@ -40,11 +40,28 @@ DEFAULT_SETTINGS = {
     "whisper_beam_size": "1",
     "whisper_best_of": "1",
     "whisper_use_gpu": "0",
+    # Long-audio anti-hallucination: split when longer than threshold into fixed chunks
+    "whisper_long_audio_threshold_seconds": "3600",  # > 60 minutes
+    "whisper_chunk_seconds": "1800",  # 30-minute pieces
     "theme": "clam",
     "notifications_enabled": "1",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3",
     "use_streaming_pipeline": "1",  # Ativar pipeline paralelo por padrão
+    # Long-term memory (rag-sqlite projection) — see docs/plans/PLAN-youtube-ltm-rag.md
+    "rag_enabled": "1",
+    "rag_sqlite_cli": "rag-sqlite",
+    "rag_sqlite_root": str(Path.home() / "desenvolvimento" / "rag-sqlite"),
+    "rag_db_name": "youtube_rag.sqlite",
+    "rag_embedding_provider": "ollama",  # use hash offline/tests; ollama for quality
+    "rag_embedding_model": "embeddinggemma",
+    "rag_top_k": "8",
+    "rag_min_score": "0.15",
+    "rag_max_context_chars": "16000",
+    "rag_expand_neighbors": "1",
+    "rag_default_scope": "video",  # chat default: current video
+    "rag_index_on_save": "1",
+    "rag_fallback_full_text": "1",
 }
 
 

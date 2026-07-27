@@ -116,8 +116,32 @@ class QueueTab(ttk.Frame):
     def add_url(self, url):
         if not url:
             return
-        queue_id = add_queue_item(url)
-        self._insert_queue_row(queue_id, url, "pending", None)
+        from core.url_resolver import classify_youtube_url, expand_input_urls, is_youtube_url
+
+        urls_to_add = [url]
+        if is_youtube_url(url):
+            kind = classify_youtube_url(url)
+            if kind == "playlist":
+                expanded = expand_input_urls([url])
+                if not expanded:
+                    messagebox.showwarning("Playlist", "Nao foi possivel expandir a playlist.")
+                    return
+                urls_to_add = [str(u) if not isinstance(u, (tuple, list)) else str(u[1]) for u in expanded]
+                messagebox.showinfo(
+                    "Playlist",
+                    f"Playlist expandida: {len(urls_to_add)} video(s) adicionados a fila.",
+                )
+            elif kind == "video_with_playlist_context":
+                # Default: only this video (strip list=)
+                expanded = expand_input_urls([url], expand_watch_list=False)
+                urls_to_add = [str(u) if not isinstance(u, (tuple, list)) else str(u[1]) for u in expanded]
+            else:
+                expanded = expand_input_urls([url])
+                urls_to_add = [str(u) if not isinstance(u, (tuple, list)) else str(u[1]) for u in expanded]
+
+        for u in urls_to_add:
+            queue_id = add_queue_item(u)
+            self._insert_queue_row(queue_id, u, "pending", None)
 
     def _add_to_queue(self):
         url = self.queue_entry.get().strip()

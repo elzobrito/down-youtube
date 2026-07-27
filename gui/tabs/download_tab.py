@@ -136,6 +136,54 @@ class DownloadTab(ttk.Frame):
 
         if not url:
             return
+
+        from core.url_resolver import (
+            classify_youtube_url,
+            expand_input_urls,
+            is_youtube_url,
+        )
+
+        if is_youtube_url(url):
+            kind = classify_youtube_url(url)
+            if kind == "playlist":
+                self.log.log("📋 Expandindo playlist…", "info")
+                expanded = expand_input_urls([url], logger=lambda m: self.log.log(m, "info"))
+                n = len(expanded)
+                if n == 0:
+                    messagebox.showwarning("Playlist", "Nao foi possivel expandir a playlist.")
+                    return
+                if not messagebox.askyesno(
+                    "Playlist detectada",
+                    f"Esta URL e uma playlist com {n} video(s).\n\n"
+                    f"Deseja processar todos agora?",
+                ):
+                    return
+                self.app.start_urls(expanded)
+                self.url_entry.delete(0, tk.END)
+                return
+            if kind == "video_with_playlist_context":
+                # Default: only the video; optional expand entire list
+                expand_list = messagebox.askyesno(
+                    "Video com playlist",
+                    "Esta URL aponta para um video dentro de uma playlist.\n\n"
+                    "Sim = processar so este video\n"
+                    "Nao = expandir a playlist inteira",
+                )
+                # askyesno: True = Yes = only this video
+                expanded = expand_input_urls(
+                    [url],
+                    expand_watch_list=not expand_list,
+                    logger=lambda m: self.log.log(m, "info"),
+                )
+                self.app.start_urls(expanded)
+                self.url_entry.delete(0, tk.END)
+                return
+
+            expanded = expand_input_urls([url], logger=lambda m: self.log.log(m, "info"))
+            self.app.start_urls(expanded)
+            self.url_entry.delete(0, tk.END)
+            return
+
         self.app.start_urls([url])
         self.url_entry.delete(0, tk.END)
 

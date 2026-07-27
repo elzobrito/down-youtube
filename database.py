@@ -348,15 +348,48 @@ def save_transcription(
     transcription_id = cursor.lastrowid
     conn.commit()
     conn.close()
+
+    # Best-effort LTM enqueue (never fail the writer pipeline)
+    try:
+        from core.rag_bridge import on_transcription_saved
+
+        on_transcription_saved(transcription_id)
+    except Exception:
+        pass
+
     return transcription_id
 
 
 def get_transcription(transcription_id):
+    """Load one transcription with video metadata via named columns.
+
+    Uses an explicit SELECT (not t.*) so column order never shifts when
+    new transcriptions columns such as is_used are added.
+    """
     conn = _connect()
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT t.*, v.title, v.url, v.channel, v.audio_path, v.video_path
+        SELECT
+            t.id AS id,
+            t.video_id AS video_id,
+            t.language AS language,
+            t.full_text AS full_text,
+            t.segments_json AS segments_json,
+            t.word_count AS word_count,
+            t.duration_seconds AS duration_seconds,
+            t.model_used AS model_used,
+            t.audio_hash AS audio_hash,
+            t.created_at AS created_at,
+            t.updated_at AS updated_at,
+            COALESCE(t.is_used, 0) AS is_used,
+            v.title AS video_title,
+            v.url AS video_url,
+            v.channel AS channel,
+            v.video_id AS youtube_video_id,
+            v.audio_path AS audio_path,
+            v.video_path AS video_path
         FROM transcriptions t
         JOIN videos v ON t.video_id = v.id
         WHERE t.id = ?
@@ -368,21 +401,26 @@ def get_transcription(transcription_id):
     conn.close()
 
     if result:
+        segments_raw = result["segments_json"]
         return {
-            "id": result[0],
-            "video_id": result[1],
-            "language": result[2],
-            "full_text": result[3],
-            "segments": json.loads(result[4]) if result[4] else None,
-            "word_count": result[5],
-            "duration": result[6],
-            "model": result[7],
-            "created_at": result[8],
-            "video_title": result[10],
-            "video_url": result[11],
-            "channel": result[12],
-            "audio_path": from_storage_path(result[13]) if result[13] else None,
-            "video_path": from_storage_path(result[14]) if result[14] else None,
+            "id": result["id"],
+            "video_id": result["video_id"],
+            "language": result["language"],
+            "full_text": result["full_text"],
+            "segments": json.loads(segments_raw) if segments_raw else None,
+            "word_count": result["word_count"],
+            "duration": result["duration_seconds"],
+            "model": result["model_used"],
+            "audio_hash": result["audio_hash"],
+            "created_at": result["created_at"],
+            "updated_at": result["updated_at"],
+            "is_used": result["is_used"],
+            "video_title": result["video_title"],
+            "video_url": result["video_url"],
+            "channel": result["channel"],
+            "youtube_video_id": result["youtube_video_id"],
+            "audio_path": from_storage_path(result["audio_path"]) if result["audio_path"] else None,
+            "video_path": from_storage_path(result["video_path"]) if result["video_path"] else None,
         }
     return None
 
@@ -505,6 +543,13 @@ def delete_transcription(transcription_id):
     cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
     conn.commit()
     conn.close()
+
+    try:
+        from core.rag_bridge import on_transcription_deleted
+
+        on_transcription_deleted(transcription_id)
+    except Exception:
+        pass
 
 
 def get_transcription_stats():

@@ -62,10 +62,15 @@ def create_worker():
 
 def run_cli(urls):
     from database import init_database
+    from core.url_resolver import expand_input_urls
 
     init_database()
+    # Expand playlists before processing; each job remains a single video
+    expanded = expand_input_urls(urls, expand_watch_list=False, logger=print)
+    if len(expanded) != len(urls):
+        print(f"Playlist(s) expandida(s): {len(urls)} entrada(s) → {len(expanded)} video(s)")
     worker = create_worker()
-    summary = worker.processar_lista(urls)
+    summary = worker.processar_lista(expanded)
     if summary.get("cancelled") or summary.get("failed", 0) > 0:
         return 1
     return 0
