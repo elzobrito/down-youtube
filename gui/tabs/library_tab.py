@@ -33,38 +33,68 @@ class LibraryTab(ttk.Frame):
         self._load_transcriptions()
 
     def _create_widgets(self):
-        search_frame = ttk.LabelFrame(self, text="Buscar Transcricoes", padding=10)
-        search_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        outer = ttk.Frame(self)
+        outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        # --- Toolbar / search ---
+        search_frame = ttk.LabelFrame(
+            outer,
+            text="Biblioteca",
+            padding=(14, 10),
+            style="Card.TLabelframe",
+        )
+        search_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            search_frame,
+            text="Busque e abra transcricoes salvas.",
+            style="Subtitle.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        toolbar = ttk.Frame(search_frame, style="Card.TFrame")
+        toolbar.pack(fill=tk.X)
 
         self.search_var = tk.StringVar()
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=40)
-        self.search_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.search_entry = ttk.Entry(
+            toolbar, textvariable=self.search_var, width=36, style="Hero.TEntry"
+        )
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
         self.search_entry.bind("<Return>", lambda e: self._search())
         self.search_entry.bind("<Escape>", lambda e: self._clear_search())
         attach_entry_context_menu(self.search_entry)
 
-        ttk.Button(search_frame, text="Buscar", command=self._search).pack(side=tk.LEFT)
-        ttk.Button(search_frame, text="Limpar", command=self._clear_search).pack(
-            side=tk.LEFT, padx=5
-        )
+        ttk.Button(
+            toolbar, text="Buscar", command=self._search, style="Primary.TButton"
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(
+            toolbar, text="Limpar", command=self._clear_search, style="Secondary.TButton"
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
-        ttk.Label(search_frame, text="Idioma:").pack(side=tk.LEFT, padx=(20, 5))
-        self.lang_filter = ttk.Combobox(search_frame, values=["Todos", "pt", "en", "es"], width=10)
+        ttk.Label(toolbar, text="Idioma:", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.lang_filter = ttk.Combobox(
+            toolbar, values=["Todos", "pt", "en", "es"], width=8, state="readonly"
+        )
         self.lang_filter.set("Todos")
         self.lang_filter.pack(side=tk.LEFT)
         self.lang_filter.bind("<<ComboboxSelected>>", self._on_filter_change)
 
-        self.stats_label = ttk.Label(search_frame, text="")
+        self.stats_label = ttk.Label(toolbar, text="", style="Stats.TLabel")
         self.stats_label.pack(side=tk.RIGHT)
 
-        main_frame = ttk.Frame(self)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # --- List + preview ---
+        main_frame = ttk.Frame(outer)
+        main_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        list_frame = ttk.Frame(paned)
-        paned.add(list_frame, weight=1)
+        list_card = ttk.LabelFrame(
+            paned, text="Transcricoes", padding=8, style="Card.TLabelframe"
+        )
+        paned.add(list_card, weight=1)
+
+        list_frame = ttk.Frame(list_card, style="Card.TFrame")
+        list_frame.pack(fill=tk.BOTH, expand=True)
 
         columns = ("titulo", "canal", "palavras", "data", "usado")
         apply_treeview_row_style(self.app.style)
@@ -91,7 +121,13 @@ class LibraryTab(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", self._open_transcription)
 
-        # Context menu na treeview (botao direito)
+        self.empty_label = ttk.Label(
+            list_card,
+            text="Nenhuma transcricao ainda. Processe um video na aba Download.",
+            style="Muted.TLabel",
+            justify=tk.CENTER,
+        )
+
         attach_treeview_context_menu(self.tree, [
             ("📂 Abrir", lambda: self._open_transcription()),
             ("📄 Copiar Texto", self._copy_text),
@@ -102,7 +138,9 @@ class LibraryTab(ttk.Frame):
             ("🗑️ Excluir", self._delete_selected),
         ])
 
-        preview_frame = ttk.LabelFrame(paned, text="Preview", padding=10)
+        preview_frame = ttk.LabelFrame(
+            paned, text="Preview", padding=10, style="Card.TLabelframe"
+        )
         paned.add(preview_frame, weight=2)
 
         self.preview_text = scrolledtext.ScrolledText(
@@ -114,30 +152,51 @@ class LibraryTab(ttk.Frame):
         self.preview_text.pack(fill=tk.BOTH, expand=True)
         attach_text_context_menu(self.preview_text, readonly=True)
 
-        action_frame = ttk.Frame(self)
-        action_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
+        # --- Actions ---
+        action_frame = ttk.LabelFrame(
+            outer, text="Acoes", padding=(10, 8), style="Card.TLabelframe"
+        )
+        action_frame.pack(fill=tk.X)
 
-        btn_open = ttk.Button(action_frame, text="Abrir", command=self._open_transcription)
-        btn_open.pack(side=tk.LEFT, padx=2)
+        btn_open = ttk.Button(
+            action_frame,
+            text="Abrir",
+            command=self._open_transcription,
+            style="Primary.TButton",
+        )
+        btn_open.pack(side=tk.LEFT, padx=(0, 4))
         ToolTip(btn_open, "Abrir transcricao completa")
 
-        btn_audio = ttk.Button(action_frame, text="Abrir Audio", command=self._open_audio)
+        btn_audio = ttk.Button(
+            action_frame, text="Audio", command=self._open_audio, style="Secondary.TButton"
+        )
         btn_audio.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_audio, "Reproduzir arquivo de audio")
 
-        btn_video = ttk.Button(action_frame, text="Abrir Video", command=self._open_video)
+        btn_video = ttk.Button(
+            action_frame, text="Video", command=self._open_video, style="Secondary.TButton"
+        )
         btn_video.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_video, "Reproduzir arquivo de video")
 
-        btn_copy = ttk.Button(action_frame, text="Copiar", command=self._copy_text)
+        btn_copy = ttk.Button(
+            action_frame, text="Copiar", command=self._copy_text, style="Secondary.TButton"
+        )
         btn_copy.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_copy, "Copiar texto da transcricao")
 
-        btn_delete = ttk.Button(action_frame, text="Excluir", command=self._delete_selected)
+        btn_delete = ttk.Button(
+            action_frame,
+            text="Excluir",
+            command=self._delete_selected,
+            style="Secondary.TButton",
+        )
         btn_delete.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_delete, "Excluir transcricao selecionada")
 
-        btn_used = ttk.Button(action_frame, text="✓ Usado", command=self._toggle_used)
+        btn_used = ttk.Button(
+            action_frame, text="Usado", command=self._toggle_used, style="Secondary.TButton"
+        )
         btn_used.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_used, "Marcar/desmarcar como usada")
 
@@ -154,19 +213,30 @@ class LibraryTab(ttk.Frame):
         export_menu_btn.pack(side=tk.LEFT, padx=10)
         ToolTip(export_menu_btn, "Exportar em varios formatos")
 
-        btn_drive = ttk.Button(action_frame, text="Enviar para Drive", command=self._upload_to_drive)
+        btn_drive = ttk.Button(
+            action_frame,
+            text="Drive",
+            command=self._upload_to_drive,
+            style="Secondary.TButton",
+        )
         btn_drive.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_drive, "Enviar transcricao para Google Drive")
 
-        btn_chat = ttk.Button(action_frame, text="Chat IA", command=self._open_chat)
+        btn_chat = ttk.Button(
+            action_frame, text="Chat IA", command=self._open_chat, style="Secondary.TButton"
+        )
         btn_chat.pack(side=tk.LEFT, padx=2)
         ToolTip(btn_chat, "Abrir chat com IA sobre esta transcricao")
 
-        btn_translate = ttk.Button(action_frame, text="Traduzir", command=self._translate_selected)
+        btn_translate = ttk.Button(
+            action_frame,
+            text="Traduzir",
+            command=self._translate_selected,
+            style="Secondary.TButton",
+        )
         btn_translate.pack(side=tk.RIGHT, padx=2)
         ToolTip(btn_translate, "Traduzir transcricao para outro idioma")
 
-        # Flash status nao-bloqueante
         self.status_flash = StatusFlash(action_frame)
         self.status_flash.pack(side=tk.LEFT, padx=10)
 
@@ -176,6 +246,7 @@ class LibraryTab(ttk.Frame):
 
         transcriptions = get_all_transcriptions()
         lang_filter = self.lang_filter.get()
+        shown = 0
 
         for t in transcriptions:
             id_, title, channel, lang, words, duration, created, is_used = t
@@ -187,6 +258,7 @@ class LibraryTab(ttk.Frame):
                 date_str = str(created)[:16]
 
             used_str = "\u2705" if is_used else ""
+            shown += 1
 
             self.tree.insert(
                 "",
@@ -209,6 +281,13 @@ class LibraryTab(ttk.Frame):
                 f"{stats['total_duration_hours']:.1f}h"
             )
         )
+
+        # Empty state hint under the tree when nothing matches
+        if hasattr(self, "empty_label"):
+            if shown == 0:
+                self.empty_label.pack(fill=tk.X, pady=12)
+            else:
+                self.empty_label.pack_forget()
 
     def refresh(self):
         self._load_transcriptions()

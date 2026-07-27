@@ -1,6 +1,8 @@
 """
 YouTube Transcriber - Interface Grafica
 Ferramenta para download e transcricao de videos do YouTube
+
+Processing goes through the shared application layer (app.jobs), same as CLI/API.
 """
 
 import threading
@@ -11,7 +13,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from database import init_database, get_setting
-from core.worker import TranscriberWorker
+from app.jobs import (
+    cancel_job,
+    create_batch_job,
+    create_job,
+    get_job,
+    has_active_work,
+    start_worker_loop,
+)
 
 from gui.tabs.download_tab import DownloadTab
 from gui.tabs.queue_tab import QueueTab
@@ -30,19 +39,31 @@ class YouTubeTranscriberApp:
         self.root.minsize(1000, 650)
 
         init_database()
+        start_worker_loop()
 
         self.style = ttk.Style()
-        theme = get_setting("theme")
-        if theme in self.style.theme_names():
-            self.style.theme_use(theme)
-        apply_treeview_row_style(self.style)
+        self.theme_text_config = {}
+        self._apply_startup_theme()
 
-        self.worker = None
+        # Application-layer job tracking (replaces direct TranscriberWorker)
+        self.active_job_id = None
+        self._poll_log_len = 0
+        self._poll_after_id = None
+
         self._create_menu()
         self._create_notebook()
         self._setup_global_shortcuts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Escape>", self._on_escape)
+
+    def _apply_startup_theme(self):
+        """Apply polished light/dark theme (or native ttk) from settings."""
+        from gui.themes import apply_app_theme
+
+        theme = get_setting("theme") or "Light (Custom)"
+        result = apply_app_theme(self.root, self.style, theme)
+        self.theme_text_config = result.get("text") or {}
+        apply_treeview_row_style(self.style)
 
     def _set_initial_geometry(self):
         geometry = calculate_initial_geometry(
@@ -84,11 +105,11 @@ class YouTubeTranscriberApp:
             "settings": self.settings_tab,
         }
 
-        self.notebook.add(self.download_tab, text="Download")
-        self.notebook.add(self.queue_tab, text="Fila")
-        self.notebook.add(self.library_tab, text="Biblioteca")
-        self.notebook.add(self.history_tab, text="Historico")
-        self.notebook.add(self.settings_tab, text="Configuracoes")
+        self.notebook.add(self.download_tab, text="  Download  ")
+        self.notebook.add(self.queue_tab, text="  Fila  ")
+        self.notebook.add(self.library_tab, text="  Biblioteca  ")
+        self.notebook.add(self.history_tab, text="  Historico  ")
+        self.notebook.add(self.settings_tab, text="  Configuracoes  ")
 
     def _setup_global_shortcuts(self):
         """Configura atalhos de teclado globais"""
@@ -122,148 +143,191 @@ class YouTubeTranscriberApp:
         if tab:
             self.notebook.select(tab)
 
+    def _is_busy(self) -> bool:
+        if self.active_job_id:
+            job = get_job(self.active_job_id)
+            if job and job.status in ("queued", "running"):
+                return True
+        return has_active_work()
+
     def start_urls(self, urls):
-        if self.worker and self.worker.running:
+        if self._is_busy():
             messagebox.showwarning("Aviso", "Ha um processamento em andamento.")
+            return
+        if not urls:
             return
 
         self.download_tab.set_processing(True)
         self.queue_tab.set_processing(True)
+        self._log(f"📋 Enfileirando {len(urls)} item(ns) via app.jobs…")
 
-        self.worker = TranscriberWorker(
-            self._log,
-            self._update_progress,
-            self._on_complete,
-            None,
-            self._confirm_action,
+        jid = create_batch_job(
+            list(urls),
+            auto_start=True,
+            confirm_callback=self._confirm_action,
         )
-
-        thread = threading.Thread(
-            target=self.worker.processar_lista,
-            args=(urls,),
-            daemon=True,
-        )
-        thread.start()
+        self._begin_job_watch(jid)
 
     def start_local_file(self, filepath):
-        if self.worker and self.worker.running:
+        if self._is_busy():
             messagebox.showwarning("Aviso", "Ha um processamento em andamento.")
             return
 
         self.download_tab.set_processing(True)
         self.queue_tab.set_processing(True)
+        self._log(f"📁 Enfileirando arquivo local via app.jobs…")
 
-        self.worker = TranscriberWorker(
-            self._log,
-            self._update_progress,
-            self._on_complete,
-            None,
-            self._confirm_action,
-        )
+        jid = create_job(path=filepath, auto_start=True)
+        # Local jobs still get confirm hooks if reprocess is triggered mid-pipeline
+        from app.jobs import set_job_hooks
 
-        thread = threading.Thread(
-            target=self.worker.processar_lista,
-            args=([(None, filepath, "local")],),
-            daemon=True,
-        )
-        thread.start()
+        set_job_hooks(jid, confirm_callback=self._confirm_action)
+        self._begin_job_watch(jid)
 
     def start_queue_items(self, items):
-        if self.worker and self.worker.running:
+        if self._is_busy():
             messagebox.showwarning("Aviso", "Ha um processamento em andamento.")
+            return
+        if not items:
             return
 
         self.download_tab.set_processing(True)
         self.queue_tab.set_processing(True)
+        self._log(f"📋 Processando fila ({len(items)} item(ns)) via app.jobs…")
 
-        self.worker = TranscriberWorker(
-            self._log,
-            self._update_progress,
-            self._on_complete,
-            self._update_queue_status,
-            self._confirm_action,
-        )
+        # items: (queue_id, url) — worker expects optional 3rd type
+        batch = []
+        for it in items:
+            if isinstance(it, (tuple, list)) and len(it) >= 2:
+                batch.append((it[0], it[1]))
+            else:
+                batch.append(it)
 
-        thread = threading.Thread(
-            target=self.worker.processar_lista,
-            args=(items,),
-            daemon=True,
+        jid = create_batch_job(
+            batch,
+            auto_start=True,
+            confirm_callback=self._confirm_action,
+            queue_status_callback=self._update_queue_status,
         )
-        thread.start()
+        self._begin_job_watch(jid)
 
     def cancel_process(self):
-        if self.worker:
-            self.worker.cancelar()
-            self._log("⏳ Cancelando...")
+        if self.active_job_id:
+            cancel_job(self.active_job_id)
+            self._log("⏳ Cancelando job…")
+
+    def _begin_job_watch(self, job_id: str):
+        self.active_job_id = job_id
+        self._poll_log_len = 0
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except Exception:
+                pass
+        self._poll_job()
+
+    def _poll_job(self):
+        """Poll app.jobs for log/progress and completion (UI thread)."""
+        jid = self.active_job_id
+        if not jid:
+            return
+
+        job = get_job(jid)
+        if not job:
+            self._finish_processing()
+            return
+
+        # Stream new log lines
+        tail = job.log_tail or ""
+        if len(tail) > self._poll_log_len:
+            new = tail[self._poll_log_len :]
+            self._poll_log_len = len(tail)
+            for line in new.splitlines():
+                if line.strip():
+                    self.download_tab.log_message(line, "info")
+
+        if job.progress:
+            self._apply_progress_dict(job.progress)
+
+        if job.status in ("done", "failed", "cancelled"):
+            if job.status == "failed" and job.error_message:
+                self.download_tab.log_message(f"❌ {job.error_message}", "error")
+            elif job.status == "cancelled":
+                self.download_tab.log_message("⚠️ Job cancelado", "warning")
+            elif job.status == "done":
+                self.download_tab.log_message("✅ Job concluído", "success")
+            self._finish_processing()
+            return
+
+        self._poll_after_id = self.root.after(250, self._poll_job)
+
+    def _finish_processing(self):
+        self.active_job_id = None
+        self._poll_after_id = None
+        self._on_complete()
 
     def _on_escape(self, event):
         """Cancela processamento ao pressionar Escape (se não estiver em campo de texto)"""
-        # Verificar se o foco está em um widget de entrada de texto
         focused_widget = self.root.focus_get()
         if isinstance(focused_widget, (tk.Entry, tk.Text)):
-            return  # Deixa o Escape funcionar normalmente nos campos de texto
-        
-        # Se há processamento em andamento, cancela
-        if self.worker and self.worker.running:
-            self.cancel_process()
+            return
+
+        if self.active_job_id:
+            job = get_job(self.active_job_id)
+            if job and job.status in ("queued", "running"):
+                self.cancel_process()
 
     def _log(self, message):
         self.root.after(0, lambda: self.download_tab.log_message(str(message), "info"))
 
+    def _apply_progress_dict(self, message: dict):
+        if not isinstance(message, dict):
+            return
+        stage = message.get("stage")
+
+        if stage == "pipeline_mode":
+            self.download_tab.set_pipeline_mode(message.get("mode", "idle"))
+        elif stage == "download":
+            self.download_tab.update_download_progress(
+                percent=int(message.get("percent", 0)),
+                speed=message.get("speed", "-"),
+                eta=message.get("eta", "-"),
+                downloaded=message.get("downloaded_mb", 0),
+                total=message.get("total_mb", 0),
+            )
+        elif stage == "conversion":
+            self.download_tab.update_conversion_progress(
+                percent=int(message.get("percent", 0)),
+                format_info=message.get("format", "PCM 16kHz Mono"),
+                speed=message.get("speed", "1.0"),
+                size=message.get("size_mb", 0),
+            )
+        elif stage == "transcription":
+            self.download_tab.update_transcription_progress(
+                percent=int(message.get("percent", 0)),
+                elapsed=message.get("elapsed", "00:00"),
+                model=message.get("model", ""),
+                threads=message.get("threads", 0),
+                words=message.get("words", 0),
+            )
+        elif stage == "stats":
+            self.download_tab.update_stats(**message)
+        elif stage == "nerd_download":
+            self.download_tab.update_nerd_download(**message)
+        elif stage == "nerd_conversion":
+            self.download_tab.update_nerd_conversion(**message)
+        elif stage == "nerd_transcription":
+            self.download_tab.update_nerd_transcription(**message)
+        elif stage == "nerd_filesystem":
+            self.download_tab.update_nerd_filesystem(**message)
+        elif stage == "status":
+            self.download_tab.log_message(message.get("message", ""), "info")
+
     def _update_progress(self, message):
+        """Legacy callback shape — kept for compatibility if needed."""
         def apply_update():
             if isinstance(message, dict):
-                stage = message.get("stage")
-                
-                if stage == "pipeline_mode":
-                    # Definir modo do pipeline
-                    mode = message.get("mode", "idle")
-                    self.download_tab.set_pipeline_mode(mode)
-                
-                elif stage == "download":
-                    self.download_tab.update_download_progress(
-                        percent=int(message.get("percent", 0)),
-                        speed=message.get("speed", "-"),
-                        eta=message.get("eta", "-"),
-                        downloaded=message.get("downloaded_mb", 0),
-                        total=message.get("total_mb", 0),
-                    )
-                
-                elif stage == "conversion":
-                    self.download_tab.update_conversion_progress(
-                        percent=int(message.get("percent", 0)),
-                        format_info=message.get("format", "PCM 16kHz Mono"),
-                        speed=message.get("speed", "1.0"),
-                        size=message.get("size_mb", 0),
-                    )
-                
-                elif stage == "transcription":
-                    self.download_tab.update_transcription_progress(
-                        percent=int(message.get("percent", 0)),
-                        elapsed=message.get("elapsed", "00:00"),
-                        model=message.get("model", ""),
-                        threads=message.get("threads", 0),
-                        words=message.get("words", 0),
-                    )
-                
-                elif stage == "stats":
-                    # Atualizar estatísticas do sistema
-                    self.download_tab.update_stats(**message)
-                
-                elif stage == "nerd_download":
-                    self.download_tab.update_nerd_download(**message)
-                
-                elif stage == "nerd_conversion":
-                    self.download_tab.update_nerd_conversion(**message)
-                
-                elif stage == "nerd_transcription":
-                    self.download_tab.update_nerd_transcription(**message)
-                
-                elif stage == "nerd_filesystem":
-                    self.download_tab.update_nerd_filesystem(**message)
-                
-                elif stage == "status":
-                    self.download_tab.log_message(message.get("message", ""), "info")
+                self._apply_progress_dict(message)
             else:
                 self.download_tab.update_progress(message)
 
@@ -281,7 +345,7 @@ class YouTubeTranscriberApp:
             done.set()
 
         self.root.after(0, ask)
-        done.wait()
+        done.wait(timeout=600)
         return result["value"]
 
     def _on_complete(self):
@@ -339,18 +403,26 @@ class YouTubeTranscriberApp:
         messagebox.showinfo(
             "Sobre",
             "YouTube Transcriber\n\n"
-            "Versao 2.1 (refactored)\n\n"
-            "Ferramenta para download e transcricao\n"
-            "automatica de videos do YouTube.",
+            "Versao 2.2 (app layer)\n\n"
+            "GUI, CLI e API compartilham app.jobs\n"
+            "para download e transcricoes.",
         )
 
     def _on_close(self):
-        if self.worker and self.worker.running:
+        busy = False
+        if self.active_job_id:
+            job = get_job(self.active_job_id)
+            busy = bool(job and job.status in ("queued", "running"))
+        if not busy:
+            busy = has_active_work()
+
+        if busy:
             if messagebox.askyesno(
                 "Confirmar",
                 "Ha um processamento em andamento.\nDeseja realmente sair?",
             ):
-                self.worker.cancelar()
+                if self.active_job_id:
+                    cancel_job(self.active_job_id)
                 self.root.destroy()
         else:
             self.root.destroy()

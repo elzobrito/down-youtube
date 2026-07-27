@@ -1,9 +1,9 @@
-# YouTube Transcriber
+# YouTube Transcriber (down-youtube)
 
-Desktop application for downloading, transcribing, organizing, and exporting
-**YouTube** videos (first-class), other sites **best-effort via yt-dlp** (e.g. Vimeo),
-and local media files. It combines `yt-dlp`, FFmpeg, `whisper.cpp`, SQLite, and an
-optional Ollama-powered chat workflow in a cross-platform Tkinter interface.
+Local-first tool for downloading, transcribing, organizing, and exporting media.
+**YouTube** is first-class; other sites (e.g. Vimeo, X/Twitter) work **best-effort**
+via `yt-dlp`. Local files are supported. Stack: `yt-dlp`, FFmpeg, `whisper.cpp`,
+SQLite, optional Ollama + [rag-sqlite](https://github.com/elzobrito/rag-sqlite).
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
@@ -18,6 +18,46 @@ URL (video or playlist) or media file
   -> Transcribe (chunk long audio)
   -> Review / export / chat / long-term memory
 ```
+
+## Architecture (GUI + CLI + API)
+
+All three interfaces share one application layer and one SQLite database:
+
+```text
+┌─────────────┐  ┌─────────────┐  ┌──────────────────┐
+│  GUI (Tk)   │  │  CLI        │  │  API HTTP        │
+│  desktop    │  │  scripts    │  │  FastAPI         │
+└──────┬──────┘  └──────┬──────┘  └────────┬─────────┘
+       │                │                   │
+       └────────────────┼───────────────────┘
+                        ▼
+              ┌─────────────────────┐
+              │  app/               │  jobs queue, library facade
+              │  (application layer)│
+              └──────────┬──────────┘
+                         ▼
+              ┌─────────────────────┐
+              │  core/ + database   │  worker, yt-dlp, whisper, SQLite
+              └─────────────────────┘
+```
+
+| Interface | Entry | Notes |
+| --- | --- | --- |
+| **Desktop GUI** | `python main.py` | Tkinter; Download/Fila enqueue via `app.jobs` (same queue as CLI/API) |
+| **CLI jobs** | `python -m cli jobs …` | Create / status / list / cancel |
+| **HTTP API** | `python -m cli serve` | FastAPI default `http://127.0.0.1:8765` |
+| **Sync CLI** | `python main.py URL…` | Creates a job and waits for completion |
+
+### Job lifecycle
+
+```text
+queued → running → done | failed | cancelled
+```
+
+- One job runs at a time (v1).
+- Mutations use **POST**; status uses **GET** (never trigger downloads via GET).
+- Optional API auth: set `DOWN_YOUTUBE_API_TOKEN` and send `X-API-Key` or `Authorization: Bearer …`.
+- Full HTTP/CLI reference: **[docs/guides/web-api.md](docs/guides/web-api.md)**.
 
 ### Playlists vs single videos (YouTube)
 
@@ -40,7 +80,7 @@ and handed to **yt-dlp** without YouTube-only extractor options
 | --- | --- |
 | **YouTube** (watch, Shorts, Music, playlists) | Full — expand, download, transcribe, library, LTM, quality presets |
 | **Local files** (audio/video on disk) | Full — no URL required |
-| **Other sites** (e.g. **Vimeo**, SoundCloud, and many yt-dlp extractors) | **Best-effort** — single URL and multi-entry sets/playlists when yt-dlp returns `entries` |
+| **Other sites** (e.g. **Vimeo**, **X/Twitter** status URLs, SoundCloud) | **Best-effort** via yt-dlp — single URL and multi-entry sets when `entries` exist |
 | **DRM / subscription video apps** (Netflix, Disney+, etc.) | **Not supported** — not a general “any video on the internet” downloader |
 
 Notes:
@@ -74,6 +114,8 @@ Notes:
   transcriptions (with LTM `remember` scope: current video or full library).
 - Includes a streaming pipeline that overlaps download and conversion work,
   plus traditional and keep-video modes.
+- **Shared job queue** across GUI, CLI, and HTTP API (`app.jobs` + `jobs` table).
+- **Polished Light/Dark (Custom)** ttk themes on the desktop UI.
 - SQLite backup/restore uses the Online Backup API + integrity check + SHA-256.
 
 ## Feature Inventory
@@ -82,7 +124,8 @@ Implemented user-facing capabilities:
 
 | Area | Available functions |
 | --- | --- |
-| Input | YouTube URL processing (single video **or playlist**), multi-site HTTP URLs best-effort via yt-dlp, local audio/video files, clipboard http(s) detection, CLI URL arguments, URL list files |
+| Input | YouTube URL processing (single video **or playlist**), multi-site HTTP URLs best-effort via yt-dlp (incl. X/Twitter status URLs), local audio/video files, clipboard http(s) detection, CLI/API job create |
+| Jobs / API | Async job queue (`app.jobs`); CLI `python -m cli`; FastAPI `POST/GET /v1/jobs`, `GET /v1/library`, `GET /v1/health` |
 | Download | `yt-dlp` audio/video download (YouTube-aware opts only on YouTube hosts), cookies, progress hooks, streaming→traditional fallback, optional best video/audio quality settings |
 | Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
 | Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash; **long audio (>60 min) → 30 min chunks**, merge with timestamp offsets, cancel/progress across chunks |
@@ -92,7 +135,7 @@ Implemented user-facing capabilities:
 | Export | TXT, SRT, VTT, DOCX, and PDF export for selected transcriptions |
 | Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription; LTM retrieval (`remember`) with video vs full-library scope |
 | History | Processing records, status tracking, failed-item reprocessing |
-| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, theme, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
+| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, **Light/Dark (Custom)** themes, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
 | Long-term memory | `core/rag_bridge.py` projects transcriptions to `rag_corpus/`, indexes via rag-sqlite CLI, manifest lookup for citations, durable index queue |
 | Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
 | Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
@@ -126,7 +169,7 @@ source .venv/bin/activate
 .\.venv\Scripts\Activate.ps1
 ```
 
-Install dependencies and start the app:
+Install dependencies and start the **desktop** app:
 
 ```bash
 python -m pip install --upgrade pip
@@ -134,7 +177,48 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-The same entry point also accepts CLI URLs:
+### CLI (jobs)
+
+```bash
+# Enqueue (prints job_id)
+python -m cli jobs create --url "https://www.youtube.com/watch?v=..."
+python -m cli jobs create --url "https://x.com/user/status/1234567890"
+python -m cli jobs create --path "/path/to/audio.mp3"
+
+# Wait until finished (exit code 1 on failure)
+python -m cli jobs create --url "https://..." --wait
+
+python -m cli jobs status <job_id>
+python -m cli jobs list
+python -m cli jobs list --status failed
+python -m cli jobs cancel <job_id>
+python -m cli library list
+python -m cli library list -q keyword
+```
+
+### HTTP API
+
+```bash
+# Default: 127.0.0.1:8765 (local only)
+python -m cli serve
+
+curl -s -X POST http://127.0.0.1:8765/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://www.youtube.com/watch?v=..."}'
+
+curl -s http://127.0.0.1:8765/v1/jobs/<job_id>
+curl -s http://127.0.0.1:8765/v1/health
+```
+
+Optional token:
+
+```bash
+export DOWN_YOUTUBE_API_TOKEN='your-secret'
+python -m cli serve
+# then: -H 'X-API-Key: your-secret'
+```
+
+### Sync URL mode (still supported)
 
 ```bash
 python main.py "https://www.youtube.com/watch?v=..."
@@ -142,7 +226,8 @@ python main.py --url "https://www.youtube.com/watch?v=..."
 python main.py --urls urls.txt
 ```
 
-When no URL is passed, the desktop interface opens.
+When no URL is passed, the desktop interface opens. See
+[docs/guides/web-api.md](docs/guides/web-api.md) for the full API surface.
 
 ## Requirements
 
@@ -217,7 +302,7 @@ that the wrapper points to an existing Python executable.
 | Package | Purpose |
 | --- | --- |
 | `yt-dlp` | Download and metadata extraction (YouTube + multi-site extractors) |
-| `customtkinter` | Desktop UI components |
+| `customtkinter` | Desktop UI components (optional/legacy widgets) |
 | `Pillow` | Image handling |
 | `python-docx` | DOCX export |
 | `reportlab` | PDF export |
@@ -225,6 +310,8 @@ that the wrapper points to an existing Python executable.
 | `google-auth-oauthlib` | Google OAuth support for Drive integration |
 | `google-api-python-client` | Google Drive API support |
 | `ttkthemes` | Tkinter themes |
+| `fastapi` / `uvicorn` / `pydantic` | HTTP API (`python -m cli serve`) |
+| `httpx` | API tests / HTTP client support |
 | `winotify` | Optional Windows toast notifications |
 
 ## Interface
@@ -365,63 +452,73 @@ See `docs/guides/youtube-long-term-memory.md` and
 
 ```text
 down-youtube/
-  main.py                         application entry point and CLI URL handling
+  main.py                         GUI entry + sync URL mode (app.jobs create+wait)
   config.py                       settings and defaults (incl. long-audio / RAG)
-  database.py                     SQLite storage for videos, transcripts, queue, history, and chat
+  database.py                     SQLite: videos, transcripts, queue, history, chat, jobs
   requirements.txt                Python runtime dependencies
   AGENTS.md                       ESAA agent contract (optional local governance)
 
+  app/                            application layer (shared by GUI, CLI, API)
+    jobs.py                       job queue, worker bridge, batch jobs, hooks
+    library.py                    library read facade
+    models.py                     Job dataclass
+
+  cli/                            python -m cli (jobs / library / serve)
+  api/                            FastAPI app (POST/GET /v1/jobs, library, health)
+
   gui/
-    app.py                        main window and tab orchestration
+    app.py                        main window; enqueues work via app.jobs
     tabs/
-      download_tab.py             download and transcription workflow
-      queue_tab.py                URL queue management
+      download_tab.py             URL hero + progress cards
+      queue_tab.py                desktop URL queue (UI)
       library_tab.py              completed transcription library
       chat_tab.py                 Ollama chat + LTM remember
       history_tab.py              processing history
-      settings_tab.py             app configuration + memory ops
+      settings_tab.py             paths, quality, theme Light/Dark (Custom)
     widgets/                      reusable Tkinter widgets
-    themes/                       custom themes
+    themes/                       polished ttk Light/Dark manager
 
   core/
-    worker.py                     workflow orchestration and threading
-    url_resolver.py               YouTube + multi-site classify/expand (playlists/sets)
-    downloader.py                 yt-dlp integration (site-aware extractor_args)
-    streaming_downloader.py       parallel download/conversion pipeline
-    audio.py                      audio extract/normalize + long-audio split
-    transcriber.py                whisper.cpp integration + chunked merge
-    rag_bridge.py                 project/index transcriptions for rag-sqlite
-    exporter.py                   TXT, SRT, VTT, DOCX, and PDF export
+    worker.py                     pipeline orchestration (used by app.jobs)
+    url_resolver.py               YouTube + multi-site classify/expand
+    downloader.py                 yt-dlp (site-aware extractor_args)
+    streaming_downloader.py       parallel download/conversion
+    audio.py                      extract/normalize + long-audio split
+    transcriber.py                whisper.cpp + chunked merge
+    rag_bridge.py                 LTM projection for rag-sqlite
+    exporter.py                   TXT, SRT, VTT, DOCX, PDF
     ollama_client.py              Ollama REST client
-    translator.py                 translation helpers
-    updater.py                    update helpers
 
   integrations/
-    notifications.py              platform notification integration
+    notifications.py
 
   utils/
     backup.py                     SQLite Online Backup API + hash
-    portable.py                   portable-mode helpers
+    portable.py
 
   docs/
-    guides/                       operator guides (LTM, …)
-    plans/                        design/plan docs
+    guides/
+      web-api.md                  CLI + HTTP API guide
+      youtube-long-term-memory.md
+    plans/
 
   scripts/
-    memory_smoke.sh               health/stats/query smoke for YouTube RAG
+    memory_smoke.sh
 
   tests/
-    test_multisite_download.py    site-aware yt-dlp opts (YouTube vs generic)
-    test_multisite_playlist.py    multi-site playlist/set expansion
-    test_transcriber_chunk.py     long-audio split/merge/cancel
-    test_playlist_url.py          playlist expansion
-    test_rag_bridge.py            LTM bridge
+    test_app_jobs.py              job store / queue
+    test_app_worker_bridge.py
+    test_gui_app_jobs.py          GUI batch enqueue
+    test_api_jobs.py / test_api_auth.py
+    test_cli_jobs.py
+    test_multisite_*.py
+    test_theme.py
     …
 ```
 
 ## Database
 
-The app uses SQLite with tables for:
+Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data/`).
 
 | Table | Purpose |
 | --- | --- |
@@ -430,11 +527,23 @@ The app uses SQLite with tables for:
 | `transcriptions` | Transcript text, segment JSON, audio hash, and usage flag |
 | `translations` | Translated transcript text |
 | `history` | Processing attempts, status, and timing |
-| `queue` | Pending and completed queued URLs |
+| `queue` | Desktop “Fila” tab pending/failed URLs |
+| `jobs` | **Shared** async job queue for GUI, CLI, and API |
 | `chat_sessions` | Ollama chat sessions per transcription |
 | `chat_messages` | Individual chat messages |
 
 ## Changelog
+
+### v3.2 — Application layer (GUI + CLI + API)
+
+- Shared `app/` layer: job queue, library facade, single worker bridge to `core.worker`.
+- CLI: `python -m cli jobs|library|serve`.
+- HTTP API: FastAPI on `127.0.0.1:8765` by default; optional `DOWN_YOUTUBE_API_TOKEN`.
+- Desktop GUI migrates Download/Fila to `app.jobs` (same queue as CLI/API).
+- Multi-site best-effort via yt-dlp (Vimeo, X/Twitter status URLs, etc.).
+- Polished Light/Dark (Custom) ttk themes; Download/Biblioteca layout polish.
+- Best video/audio quality options in Settings.
+- Docs: [docs/guides/web-api.md](docs/guides/web-api.md).
 
 ### v3.0
 

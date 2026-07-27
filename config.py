@@ -47,7 +47,7 @@ DEFAULT_SETTINGS = {
     # Long-audio anti-hallucination: split when longer than threshold into fixed chunks
     "whisper_long_audio_threshold_seconds": "3600",  # > 60 minutes
     "whisper_chunk_seconds": "1800",  # 30-minute pieces
-    "theme": "clam",
+    "theme": "Light (Custom)",
     "notifications_enabled": "1",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3",

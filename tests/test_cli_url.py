@@ -58,10 +58,24 @@ def test_main_uses_cli_when_urls_are_provided(monkeypatch):
 
 
 def test_run_cli_returns_nonzero_when_processing_fails(monkeypatch):
-    DummyWorker.summary = {"success": 0, "failed": 1, "skipped": 0, "cancelled": False}
+    class FakeJob:
+        status = "failed"
+        error_message = "boom"
+
+    seen = {}
+
+    def fake_create_job(**kwargs):
+        seen["kwargs"] = kwargs
+        return "job-1"
+
+    def fake_wait_job(jid):
+        seen["jid"] = jid
+        return FakeJob()
 
     monkeypatch.setattr("database.init_database", lambda: None)
-    monkeypatch.setattr(main, "create_worker", lambda: DummyWorker())
+    monkeypatch.setattr("app.jobs.create_job", fake_create_job)
+    monkeypatch.setattr("app.jobs.wait_job", fake_wait_job)
 
     assert main.run_cli(["https://www.youtube.com/watch?v=abc"]) == 1
-    assert DummyWorker.seen_urls == ["https://www.youtube.com/watch?v=abc"]
+    assert seen["kwargs"]["url"] == "https://www.youtube.com/watch?v=abc"
+    assert seen["jid"] == "job-1"

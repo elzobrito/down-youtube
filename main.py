@@ -44,36 +44,29 @@ def collect_urls(args):
     return urls
 
 
-def _print_progress(message):
-    if isinstance(message, str):
-        print(message)
-
-
-def create_worker():
-    from core.worker import TranscriberWorker
-
-    return TranscriberWorker(
-        log_callback=print,
-        progress_callback=_print_progress,
-        complete_callback=None,
-        confirm_callback=lambda _title, _message: False,
-    )
-
-
 def run_cli(urls):
+    """Process URLs via application layer (create job + wait)."""
     from database import init_database
-    from core.url_resolver import expand_input_urls
+    from app.jobs import create_job, wait_job
+    from pathlib import Path as P
 
     init_database()
-    # Expand playlists before processing; each job remains a single video
-    expanded = expand_input_urls(urls, expand_watch_list=False, logger=print)
-    if len(expanded) != len(urls):
-        print(f"Playlist(s) expandida(s): {len(urls)} entrada(s) → {len(expanded)} video(s)")
-    worker = create_worker()
-    summary = worker.processar_lista(expanded)
-    if summary.get("cancelled") or summary.get("failed", 0) > 0:
-        return 1
-    return 0
+    exit_code = 0
+    for raw in urls:
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        is_local = P(raw).expanduser().exists() and not raw.startswith("http")
+        if is_local:
+            jid = create_job(path=raw, auto_start=True)
+        else:
+            jid = create_job(url=raw, auto_start=True)
+        print(f"job {jid} …")
+        job = wait_job(jid)
+        print(f"  → {job.status}" + (f" ({job.error_message})" if job.error_message else ""))
+        if job.status != "done":
+            exit_code = 1
+    return exit_code
 
 
 def main():

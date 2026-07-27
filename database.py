@@ -193,6 +193,32 @@ def init_database():
         """
     )
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'queued',
+            input_type TEXT NOT NULL,
+            input_value TEXT NOT NULL,
+            expanded_count INTEGER DEFAULT 0,
+            progress_json TEXT,
+            log_tail TEXT,
+            error_message TEXT,
+            result_transcription_id INTEGER,
+            result_video_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)"
+    )
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_title ON videos(title)")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_transcriptions_video ON transcriptions(video_id)"
@@ -889,3 +915,146 @@ def mark_all_transcriptions_unused():
     conn.commit()
     conn.close()
     return affected
+
+
+# --- Application jobs (app layer / API / CLI) ---
+
+def insert_job(
+    job_id,
+    input_type,
+    input_value,
+    status="queued",
+    expanded_count=0,
+    progress_json=None,
+    log_tail=None,
+):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO jobs (
+            id, status, input_type, input_value, expanded_count,
+            progress_json, log_tail, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            status,
+            input_type,
+            input_value,
+            expanded_count,
+            progress_json,
+            log_tail,
+            datetime.now(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return job_id
+
+
+def get_job_row(job_id):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, status, input_type, input_value, expanded_count,
+               progress_json, log_tail, error_message,
+               result_transcription_id, result_video_id,
+               created_at, started_at, finished_at
+        FROM jobs WHERE id = ?
+        """,
+        (job_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def list_job_rows(status=None, limit=50):
+    conn = _connect()
+    cursor = conn.cursor()
+    if status:
+        cursor.execute(
+            """
+            SELECT id, status, input_type, input_value, expanded_count,
+                   progress_json, log_tail, error_message,
+                   result_transcription_id, result_video_id,
+                   created_at, started_at, finished_at
+            FROM jobs WHERE status = ?
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (status, limit),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT id, status, input_type, input_value, expanded_count,
+                   progress_json, log_tail, error_message,
+                   result_transcription_id, result_video_id,
+                   created_at, started_at, finished_at
+            FROM jobs
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (limit,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def update_job_fields(job_id, **fields):
+    if not fields:
+        return
+    allowed = {
+        "status",
+        "expanded_count",
+        "progress_json",
+        "log_tail",
+        "error_message",
+        "result_transcription_id",
+        "result_video_id",
+        "started_at",
+        "finished_at",
+    }
+    cols = []
+    vals = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"Invalid job field: {key}")
+        cols.append(f"{key} = ?")
+        vals.append(value)
+    vals.append(job_id)
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"UPDATE jobs SET {', '.join(cols)} WHERE id = ?",
+        vals,
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_next_queued_job_id():
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id FROM jobs
+        WHERE status = 'queued'
+        ORDER BY created_at ASC
+        LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def count_jobs_by_status(status):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = ?", (status,))
+    n = cursor.fetchone()[0]
+    conn.close()
+    return n

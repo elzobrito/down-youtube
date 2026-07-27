@@ -18,15 +18,10 @@ def test_apply_treeview_row_style_sets_readable_rowheight():
 
     apply_treeview_row_style(style)
 
-    assert style.calls == [
-        (
-            "Treeview",
-            {
-                "font": TREEVIEW_FONT,
-                "rowheight": TREEVIEW_ROW_HEIGHT,
-            },
-        )
-    ]
+    tree_calls = [c for n, c in style.calls if n == "Treeview"]
+    assert tree_calls
+    assert tree_calls[0]["font"] == TREEVIEW_FONT
+    assert tree_calls[0]["rowheight"] == TREEVIEW_ROW_HEIGHT
 
 
 def test_apply_treeview_row_style_allows_custom_rowheight():

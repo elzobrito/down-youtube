@@ -264,18 +264,28 @@ class SettingsTab(ttk.Frame):
         ).pack(anchor=tk.W, pady=(5, 0))
 
         ttk.Label(options_frame, text="Tema:").pack(anchor=tk.W, pady=(10, 0))
-        self.theme_var = tk.StringVar(value=get_setting("theme"))
-        
-        # Lista temas nativos + custom dark
-        native_themes = list(self.style.theme_names())
-        all_themes = ["Dark (Custom)"] + native_themes
-        
+        from gui.themes import THEME_DARK, THEME_LIGHT, normalize_theme_name
+
+        stored_theme = get_setting("theme") or THEME_LIGHT
+        mode = normalize_theme_name(stored_theme)
+        if mode == "dark":
+            display_theme = THEME_DARK
+        elif mode == "light":
+            display_theme = THEME_LIGHT
+        else:
+            display_theme = stored_theme
+        self.theme_var = tk.StringVar(value=display_theme)
+
+        # Polished light/dark first, then native ttk themes
+        native_themes = [t for t in self.style.theme_names() if t not in ("clam",)]
+        all_themes = [THEME_LIGHT, THEME_DARK] + sorted(set(native_themes))
+
         theme_combo = ttk.Combobox(
             options_frame,
             textvariable=self.theme_var,
             values=all_themes,
             state="readonly",
-            width=20,
+            width=22,
         )
         theme_combo.pack(anchor=tk.W, pady=5)
         theme_combo.bind("<<ComboboxSelected>>", self._change_theme)
@@ -409,34 +419,18 @@ class SettingsTab(ttk.Frame):
 
     def _change_theme(self, event=None):
         theme = self.theme_var.get()
-        
-        if theme == "Dark (Custom)":
-            # Aplicar tema dark customizado
-            try:
-                from gui.themes.dark_custom import apply_dark_theme
-                
-                # Aplicar tema dark
-                text_colors = apply_dark_theme(self.app.root, self.style)
-                
-                # Aplicar cores aos widgets Text existentes
-                self._apply_text_colors_to_app(text_colors)
-                
-            except Exception as e:
-                self.app.root.title(f"YouTube Transcriber - Erro ao aplicar tema: {e}")
-                # Fallback para tema claro
-                self.style.theme_use('vista')
-                apply_treeview_row_style(self.style)
-        else:
-            # Tema tkinter nativo
-            try:
-                self.style.theme_use(theme)
-                apply_treeview_row_style(self.style)
-                # Resetar Text widgets para cores padrão se voltar de dark
-                self._reset_text_colors()
-            except Exception as e:
-                self.app.root.title(f"YouTube Transcriber - Erro: {e}")
-                self.style.theme_use('vista')
-                apply_treeview_row_style(self.style)
+        from gui.themes import THEME_DARK, THEME_LIGHT, apply_app_theme
+
+        try:
+            result = apply_app_theme(self.app.root, self.style, theme)
+            text_colors = result.get("text") or {}
+            self._apply_text_colors_to_app(text_colors)
+            if hasattr(self.app, "theme_text_config"):
+                self.app.theme_text_config = text_colors
+        except Exception as e:
+            self.app.root.title(f"YouTube Transcriber - Erro ao aplicar tema: {e}")
+            apply_app_theme(self.app.root, self.style, THEME_LIGHT)
+            apply_treeview_row_style(self.style)
     
     def _apply_text_colors_to_app(self, colors):
         """Aplica cores aos widgets Text (não-ttk) recursivamente"""
