@@ -298,7 +298,7 @@ class TranscriberWorker:
             thumbnail_url=(info or {}).get("thumbnail"),
             audio_path=arquivo_wav if cfg["keep_audio"] else None,
             video_path=video_path if cfg["keep_video"] else None,
-            source_site=((info or {}).get("extractor_key") or "youtube").lower(),
+            source_site=Downloader.resolve_source_site(info, url),
         )
         
         if not cfg["keep_audio"]:
@@ -560,7 +560,7 @@ class TranscriberWorker:
             video_id=(info or {}).get("id"),
             title=(info or {}).get("title"),
             video_path=video_path if keep_video else None,
-            source_site=((info or {}).get("extractor_key") or "youtube").lower(),
+            source_site=Downloader.resolve_source_site(info, url),
         )
         add_history(
             video_db_id,

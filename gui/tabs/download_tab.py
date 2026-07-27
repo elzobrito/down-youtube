@@ -21,7 +21,11 @@ class DownloadTab(ttk.Frame):
 
     def _create_widgets(self):
         # 1. Input Frame
-        input_frame = ttk.LabelFrame(self, text="🎬 URL do Video", padding=10)
+        input_frame = ttk.LabelFrame(
+            self,
+            text="🎬 URL (YouTube ou outros sites via yt-dlp)",
+            padding=10,
+        )
         input_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
 
         self.url_entry = ttk.Entry(input_frame, font=("Segoe UI", 11))
@@ -29,6 +33,11 @@ class DownloadTab(ttk.Frame):
         self.url_entry.bind("<Return>", lambda e: self._process_single())
         self.url_entry.bind("<Escape>", lambda e: self.url_entry.delete(0, tk.END))
         self._create_context_menu()
+        ToolTip(
+            self.url_entry,
+            "YouTube (completo) ou outras URLs http(s) suportadas pelo yt-dlp "
+            "(best-effort; sem DRM / Netflix etc.). Arquivo local: botão Arquivo.",
+        )
 
         self.btn_process = ttk.Button(
             input_frame,
@@ -36,7 +45,10 @@ class DownloadTab(ttk.Frame):
             command=self._process_single,
         )
         self.btn_process.pack(side=tk.RIGHT)
-        ToolTip(self.btn_process, "Processar a URL digitada (Enter)")
+        ToolTip(
+            self.btn_process,
+            "Processar a URL digitada (Enter). YouTube ou multi-site via yt-dlp.",
+        )
 
         self.btn_local = ttk.Button(
             input_frame,
@@ -88,23 +100,30 @@ class DownloadTab(ttk.Frame):
         menu.add_separator()
         menu.add_command(label="🔗 Colar URL do Clipboard", command=self._paste_url_from_clipboard)
 
+    @staticmethod
+    def is_clipboard_media_url(text: str) -> bool:
+        """True for any http(s) URL suitable for paste/process (YouTube or multi-site)."""
+        from core.url_resolver import is_http_url
+
+        return is_http_url((text or "").strip())
+
     def _paste_url_from_clipboard(self):
-        """Cola URL do clipboard no campo, se for uma URL de video"""
+        """Cola URL do clipboard no campo se for http(s) (YouTube ou multi-site)."""
         try:
             clip = self.clipboard_get().strip()
-            if clip and ("youtube.com" in clip or "youtu.be" in clip or "http" in clip):
+            if clip and self.is_clipboard_media_url(clip):
                 self.url_entry.delete(0, tk.END)
                 self.url_entry.insert(0, clip)
         except tk.TclError:
             pass
 
     def check_clipboard_url(self):
-        """Se campo URL vazio e clipboard tem URL do YouTube, auto-preenche"""
+        """Se campo URL vazio e clipboard tem URL http(s), auto-preenche."""
         if self.url_entry.get().strip():
             return
         try:
             clip = self.clipboard_get().strip()
-            if clip and ("youtube.com" in clip or "youtu.be" in clip):
+            if clip and self.is_clipboard_media_url(clip):
                 self.url_entry.delete(0, tk.END)
                 self.url_entry.insert(0, clip)
                 self.url_entry.select_range(0, "end")
@@ -118,7 +137,7 @@ class DownloadTab(ttk.Frame):
         if not url:
             try:
                 clip = self.clipboard_get().strip()
-                if clip and ("youtube.com" in clip or "youtu.be" in clip):
+                if clip and self.is_clipboard_media_url(clip):
                     if messagebox.askyesno(
                         "Clipboard Detectado",
                         f"Encontrei uma URL no clipboard:\n\n{clip}\n\nDeseja processar?"
@@ -140,6 +159,7 @@ class DownloadTab(ttk.Frame):
         from core.url_resolver import (
             classify_youtube_url,
             expand_input_urls,
+            is_http_url,
             is_youtube_url,
         )
 
@@ -181,6 +201,23 @@ class DownloadTab(ttk.Frame):
 
             expanded = expand_input_urls([url], logger=lambda m: self.log.log(m, "info"))
             self.app.start_urls(expanded)
+            self.url_entry.delete(0, tk.END)
+            return
+
+        # Non-YouTube HTTP: generic multi-site expand (playlist/set via yt-dlp)
+        if is_http_url(url):
+            self.log.log("🔍 Inspecionando URL multi-site…", "info")
+            expanded = expand_input_urls([url], logger=lambda m: self.log.log(m, "info"))
+            n = len(expanded)
+            if n > 1:
+                if not messagebox.askyesno(
+                    "Playlist/set detectado",
+                    f"Esta URL parece uma playlist/set com {n} item(ns) "
+                    f"(suporte best-effort via yt-dlp).\n\n"
+                    f"Deseja processar todos agora?",
+                ):
+                    return
+            self.app.start_urls(expanded if expanded else [url])
             self.url_entry.delete(0, tk.END)
             return
 

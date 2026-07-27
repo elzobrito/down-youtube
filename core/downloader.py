@@ -1,8 +1,11 @@
 import os
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
+from urllib.parse import urlparse
 import yt_dlp
+
+from core.url_resolver import is_youtube_url
 
 
 # Compatible preset (legacy): favors MP4 merge for easy playback.
@@ -65,6 +68,44 @@ class Downloader:
             return ["abr", "asr"]
         return None
 
+    @staticmethod
+    def uses_youtube_extractor(url: str) -> bool:
+        """True when yt-dlp should receive YouTube-only extractor_args."""
+        return is_youtube_url(url or "")
+
+    @staticmethod
+    def youtube_extractor_args(url: str, clients: list) -> Optional[dict]:
+        """
+        Return extractor_args only for YouTube hosts.
+
+        Non-YouTube sites (Vimeo, etc.) must not receive youtube:player_client.
+        """
+        if not Downloader.uses_youtube_extractor(url):
+            return None
+        return {"youtube": {"player_client": list(clients)}}
+
+    @staticmethod
+    def resolve_source_site(info: Optional[dict], url: str = "") -> str:
+        """Prefer yt-dlp extractor_key; fall back to host or 'unknown' (not always youtube)."""
+        if info:
+            key = info.get("extractor_key") or info.get("extractor")
+            if key:
+                return str(key).lower()
+        raw = (url or "").strip()
+        if not raw:
+            return "unknown"
+        if is_youtube_url(raw):
+            return "youtube"
+        try:
+            host = (urlparse(raw).netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host:
+                return host.split(":")[0]
+        except Exception:
+            pass
+        return "unknown"
+
     def _common_http_headers(self):
         return {
             "User-Agent": (
@@ -75,6 +116,15 @@ class Downloader:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-us,en;q=0.5",
         }
+
+    def _format_download_error(self, url: str, exc: BaseException) -> str:
+        msg = str(exc).strip() or type(exc).__name__
+        if self.uses_youtube_extractor(url):
+            return f"Erro no download (YouTube/yt-dlp): {msg}"
+        return (
+            f"Erro no download multi-site (yt-dlp): {msg}. "
+            "Site pode não ser suportado, exigir cookies ou estar indisponível."
+        )
 
     def download_audio(
         self,
@@ -105,6 +155,7 @@ class Downloader:
         fmt = self.audio_format_spec(best_quality)
         clients = self.audio_player_clients(best_quality)
         sort = self.audio_format_sort(best_quality)
+        yt_args = self.youtube_extractor_args(url, clients)
 
         ydl_opts = cast(Any, {
             "format": fmt,
@@ -115,20 +166,22 @@ class Downloader:
             "no_warnings": True,
             "progress_hooks": [self._progress_hook],
             "http_headers": self._common_http_headers(),
-            "extractor_args": {
-                "youtube": {
-                    "player_client": clients,
-                }
-            },
             "encoding": "utf-8",
         })
+        if yt_args is not None:
+            ydl_opts["extractor_args"] = yt_args
         if sort:
             ydl_opts["format_sort"] = sort
 
         if best_quality:
+            site_note = (
+                f"clients={','.join(clients)}"
+                if yt_args is not None
+                else "multi-site genérico (sem player_client YouTube)"
+            )
             self._log(
                 f"🎧 Download de áudio em máxima qualidade "
-                f"(format={fmt}, clients={','.join(clients)}, keep_archive={keep_archive})"
+                f"(format={fmt}, {site_note}, keep_archive={keep_archive})"
             )
             # Keep original stream; convert to WAV ourselves for Whisper.
             ydl_opts["postprocessors"] = []
@@ -202,8 +255,8 @@ class Downloader:
                 return str(wav_path), info
 
         except Exception as exc:
-            self.last_error = str(exc)
-            self._log(f"❌ Erro no download: {exc}")
+            self.last_error = self._format_download_error(url, exc)
+            self._log(f"❌ {self.last_error}")
             return None, None
 
     @staticmethod
@@ -237,11 +290,17 @@ class Downloader:
         fmt = self.video_format_spec(best_quality)
         merge_fmt = self.video_merge_format(best_quality)
         clients = self.video_player_clients(best_quality)
+        yt_args = self.youtube_extractor_args(url, clients)
 
         if best_quality:
+            site_note = (
+                f"clients={','.join(clients)}"
+                if yt_args is not None
+                else "multi-site genérico (sem player_client YouTube)"
+            )
             self._log(
                 f"📥 Download de vídeo em máxima qualidade "
-                f"(format={fmt}, merge={merge_fmt}, clients={','.join(clients)})"
+                f"(format={fmt}, merge={merge_fmt}, {site_note})"
             )
 
         ydl_opts = cast(Any, {
@@ -254,13 +313,10 @@ class Downloader:
             "no_warnings": True,
             "progress_hooks": [self._progress_hook],
             "http_headers": self._common_http_headers(),
-            "extractor_args": {
-                "youtube": {
-                    "player_client": clients,
-                }
-            },
             "encoding": "utf-8",
         })
+        if yt_args is not None:
+            ydl_opts["extractor_args"] = yt_args
 
         if cookies_path and os.path.exists(cookies_path):
             ydl_opts["cookiefile"] = str(cookies_path)
@@ -278,8 +334,8 @@ class Downloader:
 
             return None, None
         except Exception as exc:
-            self.last_error = str(exc)
-            self._log(f"❌ Erro no download: {exc}")
+            self.last_error = self._format_download_error(url, exc)
+            self._log(f"❌ {self.last_error}")
             return None, None
 
     @staticmethod

@@ -1,9 +1,9 @@
 # YouTube Transcriber
 
 Desktop application for downloading, transcribing, organizing, and exporting
-YouTube videos and local media files. It combines `yt-dlp`, FFmpeg,
-`whisper.cpp`, SQLite, and an optional Ollama-powered chat workflow in a
-cross-platform Tkinter interface.
+**YouTube** videos (first-class), other sites **best-effort via yt-dlp** (e.g. Vimeo),
+and local media files. It combines `yt-dlp`, FFmpeg, `whisper.cpp`, SQLite, and an
+optional Ollama-powered chat workflow in a cross-platform Tkinter interface.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
@@ -19,7 +19,7 @@ URL (video or playlist) or media file
   -> Review / export / chat / long-term memory
 ```
 
-### Playlists vs single videos
+### Playlists vs single videos (YouTube)
 
 | URL shape | Behavior |
 | --- | --- |
@@ -30,12 +30,35 @@ URL (video or playlist) or media file
 
 Implementation: `core/url_resolver.py` (classify + expand); worker / Download / Queue / CLI all use the same expansion.
 
+### Multi-site support (best-effort via yt-dlp)
+
+YouTube remains the **primary, fully tested** path. Other HTTP(S) URLs are accepted
+and handed to **yt-dlp** without YouTube-only extractor options
+(`player_client`, etc.). Support quality depends on the yt-dlp extractor for that site.
+
+| Input | Support level |
+| --- | --- |
+| **YouTube** (watch, Shorts, Music, playlists) | Full — expand, download, transcribe, library, LTM, quality presets |
+| **Local files** (audio/video on disk) | Full — no URL required |
+| **Other sites** (e.g. **Vimeo**, SoundCloud, and many yt-dlp extractors) | **Best-effort** — single URL and multi-entry sets/playlists when yt-dlp returns `entries` |
+| **DRM / subscription video apps** (Netflix, Disney+, etc.) | **Not supported** — not a general “any video on the internet” downloader |
+
+Notes:
+
+- Non-YouTube downloads use generic yt-dlp format strings (and optional best-quality
+  settings) **without** `extractor_args.youtube`.
+- Multi-entry non-YouTube URLs are expanded via flat extract; UI confirms when N>1.
+- Cookies still help on sites that require login; configure a cookies file in Settings.
+- `source_site` in the library comes from yt-dlp `extractor_key` (or host fallback).
+- Keep yt-dlp updated: extractors break when sites change.
+
 ## At A Glance
 
 - Runs on Windows and Linux with the same Python entry point.
-- Downloads YouTube audio or video through `yt-dlp`, with cookies support for
-  restricted sessions; accepts single videos and playlists.
-- Processes local audio/video files without requiring a YouTube URL.
+- Downloads YouTube audio or video through `yt-dlp` (full support), plus other
+  sites **best-effort** via the same engine (not DRM); cookies for restricted sessions;
+  single videos and playlists/sets.
+- Processes local audio/video files without requiring a URL.
 - Transcribes locally through `whisper.cpp`, using CPU or GPU builds depending
   on the installed backend.
 - **Long audio (>60 minutes)** is automatically split into **30-minute chunks**,
@@ -59,8 +82,8 @@ Implemented user-facing capabilities:
 
 | Area | Available functions |
 | --- | --- |
-| Input | YouTube URL processing (single video **or playlist**), local audio/video file processing, clipboard URL detection, CLI URL arguments, URL list files |
-| Download | `yt-dlp` audio download, video download when keeping MP4, cookies file support, progress hooks, automatic fallback from streaming to traditional mode |
+| Input | YouTube URL processing (single video **or playlist**), multi-site HTTP URLs best-effort via yt-dlp, local audio/video files, clipboard http(s) detection, CLI URL arguments, URL list files |
+| Download | `yt-dlp` audio/video download (YouTube-aware opts only on YouTube hosts), cookies, progress hooks, streaming→traditional fallback, optional best video/audio quality settings |
 | Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
 | Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash; **long audio (>60 min) → 30 min chunks**, merge with timestamp offsets, cancel/progress across chunks |
 | Queue | Add URLs, import `.txt` lists, process pending/failed items, retry count tracking, remove selected items, clear queue |
@@ -193,7 +216,7 @@ that the wrapper points to an existing Python executable.
 
 | Package | Purpose |
 | --- | --- |
-| `yt-dlp` | YouTube download and metadata extraction |
+| `yt-dlp` | Download and metadata extraction (YouTube + multi-site extractors) |
 | `customtkinter` | Desktop UI components |
 | `Pillow` | Image handling |
 | `python-docx` | DOCX export |
@@ -210,7 +233,7 @@ The app is organized around the main transcription workflow.
 
 | Area | Purpose |
 | --- | --- |
-| Download | Process YouTube URLs or local files, monitor progress, cancel work, inspect logs, and view NERD metrics |
+| Download | Process YouTube / multi-site URLs or local files, monitor progress, cancel work, inspect logs, and view NERD metrics |
 | Queue | Add URLs, import `.txt` lists, process pending/failed items, remove items, and clear the queue |
 | Library | Search, filter, preview, open, copy, delete, export, and mark completed transcriptions as used |
 | Chat | Ask Ollama questions about a selected transcription and keep persistent sessions |
@@ -362,8 +385,8 @@ down-youtube/
 
   core/
     worker.py                     workflow orchestration and threading
-    url_resolver.py               playlist vs single-video classification/expand
-    downloader.py                 yt-dlp integration
+    url_resolver.py               YouTube + multi-site classify/expand (playlists/sets)
+    downloader.py                 yt-dlp integration (site-aware extractor_args)
     streaming_downloader.py       parallel download/conversion pipeline
     audio.py                      audio extract/normalize + long-audio split
     transcriber.py                whisper.cpp integration + chunked merge
@@ -388,6 +411,8 @@ down-youtube/
     memory_smoke.sh               health/stats/query smoke for YouTube RAG
 
   tests/
+    test_multisite_download.py    site-aware yt-dlp opts (YouTube vs generic)
+    test_multisite_playlist.py    multi-site playlist/set expansion
     test_transcriber_chunk.py     long-audio split/merge/cancel
     test_playlist_url.py          playlist expansion
     test_rag_bridge.py            LTM bridge

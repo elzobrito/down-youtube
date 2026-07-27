@@ -328,7 +328,8 @@ class StreamingDownloader:
             cmd = [python_exe, "-m", "yt_dlp"]
         
         fmt = Downloader.audio_format_spec(best_quality)
-        clients = ",".join(Downloader.audio_player_clients(best_quality))
+        clients = Downloader.audio_player_clients(best_quality)
+        clients_csv = ",".join(clients)
 
         # Adicionar argumentos
         cmd.extend([
@@ -338,11 +339,14 @@ class StreamingDownloader:
             "--progress",  # Mostrar progresso
             "--newline",  # Uma linha por update
             "--no-warnings",
-            # Bypass YouTube 403 - mesmas estratégias do modo tradicional
-            "--extractor-args", f"youtube:player_client={clients}",
             "--extractor-retries", "3",
             "--fragment-retries", "3",
         ])
+        # YouTube-only extractor args (multi-site must not get youtube:player_client)
+        if Downloader.uses_youtube_extractor(url):
+            cmd.extend([
+                "--extractor-args", f"youtube:player_client={clients_csv}",
+            ])
         if best_quality:
             # Prefer higher bitrate / sample rate when available
             cmd.extend(["-S", "abr,asr"])

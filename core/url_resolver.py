@@ -1,11 +1,15 @@
-"""Classify and expand YouTube URLs (single video vs playlist).
+"""Classify and expand media URLs (YouTube + multi-site via yt-dlp).
 
-Rules (YT-PLAYLIST-001):
+Rules (YT-PLAYLIST-001 — YouTube):
 - ``/playlist?list=`` → expand all entries to watch URLs
 - ``/watch?v=ID&list=`` → by default keep **only** that video (list is context)
   unless ``expand_watch_list=True``
 - bare ``/watch?v=ID`` or youtu.be/ID → single video
 - Per-item download still uses yt-dlp ``noplaylist`` so each job is one video
+
+Rules (YT-MULTISITE-002 — non-YouTube HTTP):
+- Probe with yt-dlp flat extract; if multiple ``entries`` → N individual URLs
+- Single video / no entries / extract failure → keep original URL
 """
 
 from __future__ import annotations
@@ -32,6 +36,14 @@ _YOUTUBE_HOSTS = frozenset(
 def _log(logger: Optional[Callable[[str], None]], message: str) -> None:
     if logger:
         logger(message)
+
+
+def is_http_url(url: str) -> bool:
+    try:
+        scheme = (urlparse((url or "").strip()).scheme or "").lower()
+    except Exception:
+        return False
+    return scheme in {"http", "https"}
 
 
 def is_youtube_url(url: str) -> bool:
@@ -206,6 +218,82 @@ def expand_playlist_entries(
     return out
 
 
+def _generic_entry_url(entry: Any) -> Optional[str]:
+    """Best-effort absolute URL for a yt-dlp flat playlist entry (any site)."""
+    if not entry or not isinstance(entry, dict):
+        return None
+    for key in ("webpage_url", "original_url", "url"):
+        raw = entry.get(key)
+        if not raw:
+            continue
+        u = str(raw).strip()
+        if u.startswith("http://") or u.startswith("https://"):
+            return u
+    return None
+
+
+def expand_generic_entries(
+    url: str,
+    *,
+    cookies_path: Optional[str] = None,
+    logger: Optional[Callable[[str], None]] = None,
+    ydl_factory: Optional[Callable[..., Any]] = None,
+) -> List[str]:
+    """Expand non-YouTube playlist/set/album via yt-dlp flat extract.
+
+    - Multiple entries → list of absolute entry URLs
+    - Single / no entries / extract failure → ``[original_url]`` (stable, no crash)
+
+    ``ydl_factory`` is injectable for tests (same contract as expand_playlist_entries).
+    """
+    raw = (url or "").strip()
+    if not raw or not is_http_url(raw):
+        return [raw] if raw else []
+
+    import yt_dlp
+
+    ydl_opts: dict[str, Any] = {
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": False,
+    }
+    if cookies_path and Path(cookies_path).exists():
+        ydl_opts["cookiefile"] = str(cookies_path)
+
+    factory = ydl_factory or (lambda opts: yt_dlp.YoutubeDL(opts))
+
+    try:
+        with factory(ydl_opts) as ydl:
+            info = ydl.extract_info(raw, download=False)
+    except Exception as exc:
+        _log(logger, f"⚠️ Multi-site: falha ao inspecionar URL (mantendo original): {exc}")
+        return [raw]
+
+    if not info:
+        return [raw]
+
+    entries = info.get("entries")
+    if entries is None:
+        return [raw]
+
+    out: List[str] = []
+    seen = set()
+    for entry in entries:
+        eu = _generic_entry_url(entry)
+        if eu and eu not in seen:
+            seen.add(eu)
+            out.append(eu)
+
+    if len(out) <= 1:
+        # Single video or unresolvable entries → keep original input URL
+        return [raw]
+
+    _log(logger, f"📋 Playlist/set multi-site expandido: {len(out)} item(ns)")
+    return out
+
+
 def _unpack_item(item: UrlItem) -> Tuple[Any, str, Any]:
     if isinstance(item, (tuple, list)):
         queue_id = item[0] if len(item) >= 1 else None
@@ -245,15 +333,28 @@ def expand_input_urls(
         if not url:
             continue
 
-        # Local files / non-youtube: pass through
+        # Local files: pass through
         if item_type == "local":
             result.append(_pack_item(queue_id, url, item_type, as_tuple=as_tuple))
             continue
         if Path(url).expanduser().exists() and not url.startswith("http"):
             result.append(_pack_item(queue_id, url, item_type or "local", as_tuple=as_tuple))
             continue
+
+        # Non-YouTube HTTP: optional generic playlist/set expansion (YT-MULTISITE-002)
         if not is_youtube_url(url):
-            result.append(_pack_item(queue_id, url, item_type, as_tuple=as_tuple))
+            if is_http_url(url):
+                entries = expand_generic_entries(
+                    url,
+                    cookies_path=cookies_path,
+                    logger=logger,
+                    ydl_factory=ydl_factory,
+                )
+                for i, entry_url in enumerate(entries):
+                    qid = queue_id if i == 0 else None
+                    result.append(_pack_item(qid, entry_url, item_type, as_tuple=as_tuple))
+            else:
+                result.append(_pack_item(queue_id, url, item_type, as_tuple=as_tuple))
             continue
 
         kind = classify_youtube_url(url)
