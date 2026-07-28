@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=YouTube Transcriber
+Comment=Download, transcribe, and search local YouTube / media library
+Exec=youtube-transcriber
+Icon=youtube-transcriber
+Terminal=false
+Categories=AudioVideo;Utility;
+Keywords=youtube;transcript;whisper;download;
+StartupWMClass=YouTube Transcriber

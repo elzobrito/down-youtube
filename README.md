@@ -5,6 +5,10 @@ Local-first tool for downloading, transcribing, organizing, and exporting media.
 via `yt-dlp`. Local files are supported. Stack: `yt-dlp`, FFmpeg, `whisper.cpp`,
 SQLite, optional Ollama + [rag-sqlite](https://github.com/elzobrito/rag-sqlite).
 
+<p align="center">
+  <img src="assets/icon.svg" alt="YouTube Transcriber icon" width="128" height="128"/>
+</p>
+
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)
@@ -458,6 +462,11 @@ down-youtube/
   requirements.txt                Python runtime dependencies
   AGENTS.md                       ESAA agent contract (optional local governance)
 
+  assets/
+    icon.svg                      app icon (vector source)
+    icon-mono.svg                 monochrome variant (currentColor)
+    icon.png / icon-*.png         raster exports for window / desktop launchers
+
   app/                            application layer (shared by GUI, CLI, API)
     jobs.py                       job queue, worker bridge, batch jobs, hooks
     library.py                    library read facade
@@ -543,6 +552,7 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 - Multi-site best-effort via yt-dlp (Vimeo, X/Twitter status URLs, etc.).
 - Polished Light/Dark (Custom) ttk themes; Download/Biblioteca layout polish.
 - Best video/audio quality options in Settings.
+- App icon: `assets/icon.svg` (+ PNG exports); window icon on GUI start.
 - Docs: [docs/guides/web-api.md](docs/guides/web-api.md).
 
 ### v3.0

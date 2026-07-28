@@ -37,6 +37,7 @@ class YouTubeTranscriberApp:
         self.root.title("YouTube Transcriber")
         self._set_initial_geometry()
         self.root.minsize(1000, 650)
+        self._set_window_icon()
 
         init_database()
         start_worker_loop()
@@ -55,6 +56,27 @@ class YouTubeTranscriberApp:
         self._setup_global_shortcuts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Escape>", self._on_escape)
+
+    def _set_window_icon(self):
+        """Load assets/icon.png (exported from assets/icon.svg) for the window."""
+        try:
+            from pathlib import Path
+
+            # Prefer project root next to main.py
+            candidates = [
+                Path(__file__).resolve().parents[1] / "assets" / "icon.png",
+                Path(__file__).resolve().parents[1] / "assets" / "icon-256.png",
+                Path(__file__).resolve().parents[1] / "assets" / "icon-128.png",
+            ]
+            for path in candidates:
+                if path.is_file():
+                    img = tk.PhotoImage(file=str(path))
+                    self.root.iconphoto(True, img)
+                    # Keep reference so Tk does not GC the image
+                    self._icon_image = img
+                    return
+        except Exception:
+            pass
 
     def _apply_startup_theme(self):
         """Apply polished light/dark theme (or native ttk) from settings."""
