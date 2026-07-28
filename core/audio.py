@@ -1,7 +1,41 @@
+import hashlib
 import os
 import subprocess
 import wave
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
+
+
+ASR_PREPROCESS_PRESETS = {
+    "off": None,
+    "light": "highpass=f=80,lowpass=f=7600,loudnorm=I=-16:TP=-1.5:LRA=11",
+    "speech": "highpass=f=100,lowpass=f=7000,afftdn=nr=12:nf=-25,dynaudnorm=f=150:g=15",
+}
+
+VALID_ASR_PRESETS = frozenset(ASR_PREPROCESS_PRESETS.keys())
+
+
+def normalize_asr_preprocess_preset(value: Optional[str]) -> str:
+    """Normalize legacy/invalid values to a valid preset (default off)."""
+    if value is None:
+        return "off"
+    key = str(value).strip().lower()
+    if key in VALID_ASR_PRESETS:
+        return key
+    return "off"
+
+
+@dataclass(frozen=True)
+class AudioPreprocessResult:
+    path: str
+    requested_preset: str
+    applied_preset: str
+    filter_graph: Optional[str]
+    fallback_reason: Optional[str]
+    source_audio_hash: str
+    audio_hash: str
+
 
 class AudioProcessor:
     def __init__(self, ffmpeg_path="ffmpeg", logger=None, progress_callback=None):
@@ -17,6 +51,202 @@ class AudioProcessor:
     def _progress(self, message):
         if self.progress_callback:
             self.progress_callback(message)
+
+    @staticmethod
+    def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+        hasher = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def validate_asr_wav(path: str) -> bool:
+        """True when path is PCM s16le mono 16 kHz with at least one frame."""
+        try:
+            with wave.open(path, "rb") as wav_file:
+                if wav_file.getsampwidth() != 2:
+                    return False
+                if wav_file.getnchannels() != 1:
+                    return False
+                if wav_file.getframerate() != 16000:
+                    return False
+                if wav_file.getnframes() <= 0:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def preprocess_for_asr(
+        self,
+        audio_path: str,
+        preset: str = "off",
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> AudioPreprocessResult:
+        """
+        Apply FFmpeg ASR preprocess presets atomically on the work WAV.
+
+        - off: same path, no FFmpeg, bytes unchanged, hashes equal
+        - light/speech: temp in same dir → validate → os.replace
+        - speech failure falls back to light; light failure keeps original
+        """
+        audio_path = str(audio_path)
+        requested = normalize_asr_preprocess_preset(preset)
+        source_hash = self.sha256_file(audio_path)
+
+        if requested == "off":
+            return AudioPreprocessResult(
+                path=audio_path,
+                requested_preset="off",
+                applied_preset="off",
+                filter_graph=None,
+                fallback_reason=None,
+                source_audio_hash=source_hash,
+                audio_hash=source_hash,
+            )
+
+        chain = ["speech", "light"] if requested == "speech" else ["light"]
+        last_reason = None
+
+        for attempt in chain:
+            if cancel_check and cancel_check():
+                self._log("⚠️ ASR preprocess cancelado; mantendo WAV original")
+                return AudioPreprocessResult(
+                    path=audio_path,
+                    requested_preset=requested,
+                    applied_preset="off",
+                    filter_graph=None,
+                    fallback_reason="cancelled",
+                    source_audio_hash=source_hash,
+                    audio_hash=source_hash,
+                )
+
+            graph = ASR_PREPROCESS_PRESETS[attempt]
+            ok, reason = self._run_preprocess_graph(audio_path, graph, cancel_check=cancel_check)
+            if ok:
+                audio_hash = self.sha256_file(audio_path)
+                fallback_reason = None
+                if attempt != requested:
+                    fallback_reason = last_reason or f"fallback_to_{attempt}"
+                self._progress(
+                    {
+                        "stage": "audio_preprocess",
+                        "requested_preset": requested,
+                        "applied_preset": attempt,
+                        "fallback_reason": fallback_reason,
+                    }
+                )
+                return AudioPreprocessResult(
+                    path=audio_path,
+                    requested_preset=requested,
+                    applied_preset=attempt,
+                    filter_graph=graph,
+                    fallback_reason=fallback_reason,
+                    source_audio_hash=source_hash,
+                    audio_hash=audio_hash,
+                )
+            last_reason = reason or f"{attempt}_failed"
+            self._log(f"⚠️ ASR preprocess '{attempt}' falhou: {last_reason}")
+
+        self._progress(
+            {
+                "stage": "audio_preprocess",
+                "requested_preset": requested,
+                "applied_preset": "off",
+                "fallback_reason": last_reason,
+            }
+        )
+        return AudioPreprocessResult(
+            path=audio_path,
+            requested_preset=requested,
+            applied_preset="off",
+            filter_graph=None,
+            fallback_reason=last_reason,
+            source_audio_hash=source_hash,
+            audio_hash=source_hash,
+        )
+
+    def _run_preprocess_graph(
+        self,
+        audio_path: str,
+        filter_graph: str,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> tuple:
+        """Run one FFmpeg graph into a temp file; replace only after validation.
+
+        Returns (success: bool, reason: str|None).
+        """
+        work = Path(audio_path)
+        tmp_path = work.with_name(f"{work.stem}.asrprep.tmp{work.suffix or '.wav'}")
+        # Always use .wav suffix for temp clarity
+        if tmp_path.suffix.lower() != ".wav":
+            tmp_path = work.with_name(f"{work.stem}.asrprep.tmp.wav")
+        tmp_path = Path(str(tmp_path))
+
+        command = [
+            self.ffmpeg_path,
+            "-y",
+            "-i",
+            audio_path,
+            "-af",
+            filter_graph,
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            str(tmp_path),
+        ]
+
+        try:
+            if cancel_check and cancel_check():
+                return False, "cancelled"
+
+            self._progress(
+                {
+                    "stage": "audio_preprocess",
+                    "message": "Pré-processando áudio para ASR...",
+                    "filter_graph": filter_graph,
+                }
+            )
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(work.parent),
+            )
+            if cancel_check and cancel_check():
+                return False, "cancelled"
+
+            if result.returncode != 0:
+                self.last_error = result.stderr
+                return False, (result.stderr or "ffmpeg_nonzero").strip()[:500] or "ffmpeg_nonzero"
+
+            if not tmp_path.exists():
+                return False, "output_missing"
+
+            if not self.validate_asr_wav(str(tmp_path)):
+                return False, "output_invalid"
+
+            os.replace(str(tmp_path), audio_path)
+            return True, None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False, str(exc)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     def extract_audio(self, video_path, output_dir):
         video_path = str(video_path)

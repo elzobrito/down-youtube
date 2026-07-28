@@ -73,6 +73,19 @@ def has_active_work() -> bool:
     return count_jobs_by_status("running") > 0 or count_jobs_by_status("queued") > 0
 
 
+def _snapshot_asr_preprocess_preset() -> str:
+    """Freeze current Settings preset for a new job (invalid → off)."""
+    from core.audio import normalize_asr_preprocess_preset
+    from database import get_setting
+
+    raw = get_setting("asr_audio_preprocess")
+    normalized = normalize_asr_preprocess_preset(raw)
+    if raw is not None and str(raw).strip() and normalized == "off" and str(raw).strip().lower() != "off":
+        # Legacy invalid values normalize silently to off at job boundary
+        pass
+    return normalized
+
+
 def create_job(
     *,
     url: Optional[str] = None,
@@ -96,7 +109,14 @@ def create_job(
             raise ValueError("path is empty")
 
     job_id = str(uuid.uuid4())
-    insert_job(job_id, input_type, input_value, status="queued")
+    options = {"asr_audio_preprocess": _snapshot_asr_preprocess_preset()}
+    insert_job(
+        job_id,
+        input_type,
+        input_value,
+        status="queued",
+        options_json=json.dumps(options),
+    )
     if auto_start:
         start_worker_loop()
     return job_id
@@ -129,12 +149,14 @@ def create_batch_job(
             normalized.append(str(item).strip())
 
     job_id = str(uuid.uuid4())
+    options = {"asr_audio_preprocess": _snapshot_asr_preprocess_preset()}
     insert_job(
         job_id,
         "batch",
         json.dumps(normalized, default=str),
         status="queued",
         expanded_count=len(normalized),
+        options_json=json.dumps(options),
     )
     if confirm_callback or queue_status_callback:
         set_job_hooks(
@@ -433,6 +455,13 @@ def _default_process_job(job: Job) -> Dict[str, Any]:
         complete_callback=complete_cb,
         queue_status_callback=queue_status_cb,
         confirm_callback=confirm_cb,
+    )
+    # Freeze ASR preprocess from job snapshot (legacy jobs default to off)
+    from core.audio import normalize_asr_preprocess_preset
+
+    opts = job.options if isinstance(job.options, dict) else {}
+    worker.asr_audio_preprocess = normalize_asr_preprocess_preset(
+        opts.get("asr_audio_preprocess")
     )
     with _lock:
         _active_worker = worker

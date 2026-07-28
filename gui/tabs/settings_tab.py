@@ -6,6 +6,14 @@ from utils.backup import backup_database, restore_database
 from gui.widgets.context_menu import attach_entry_context_menu
 from gui.widgets.tooltip import ToolTip
 from gui.widgets.treeview_style import apply_treeview_row_style
+from core.audio import normalize_asr_preprocess_preset
+
+ASR_PREPROCESS_UI = {
+    "Desligado": "off",
+    "Leve": "light",
+    "Fala": "speech",
+}
+ASR_PREPROCESS_LABEL = {v: k for k, v in ASR_PREPROCESS_UI.items()}
 
 
 class SettingsTab(ttk.Frame):
@@ -146,6 +154,45 @@ class SettingsTab(ttk.Frame):
             state="readonly",
             width=20,
         ).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(transcription_frame, text="Pre-processamento ASR:").grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            pady=5,
+        )
+        raw_asr = get_setting("asr_audio_preprocess")
+        asr_norm = normalize_asr_preprocess_preset(raw_asr)
+        if raw_asr is not None and str(raw_asr).strip() and str(raw_asr).strip().lower() != asr_norm:
+            # Legacy invalid → off; log-friendly warning via status bar if available
+            try:
+                if hasattr(self.app, "log"):
+                    self.app.log(
+                        f"⚠️ asr_audio_preprocess legado '{raw_asr}' normalizado para '{asr_norm}'"
+                    )
+            except Exception:
+                pass
+        self.asr_preprocess_var = tk.StringVar(
+            value=ASR_PREPROCESS_LABEL.get(asr_norm, "Desligado")
+        )
+        asr_combo = ttk.Combobox(
+            transcription_frame,
+            textvariable=self.asr_preprocess_var,
+            values=list(ASR_PREPROCESS_UI.keys()),
+            state="readonly",
+            width=20,
+        )
+        asr_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        ToolTip(
+            asr_combo,
+            "Filtros FFmpeg opcionais antes do Whisper.\n"
+            "Desligado: comportamento legado (so 16 kHz mono).\n"
+            "Leve: highpass/lowpass + loudnorm.\n"
+            "Fala: denoise + normalizacao dinamica (mais agressivo).\n\n"
+            "Nao separa musica de fundo nem vozes sobrepostas.\n"
+            "Para audio dificil, prefira modelo medium ou large "
+            "(sem troca automatica de modelo).",
+        )
 
         performance_frame = ttk.LabelFrame(
             scrollable_frame,
@@ -502,6 +549,9 @@ class SettingsTab(ttk.Frame):
         set_setting("output_dir", self.output_dir_var.get())
         set_setting("cookies_path", self.cookies_var.get())
         set_setting("whisper_language", self.language_var.get())
+        asr_label = self.asr_preprocess_var.get()
+        asr_value = ASR_PREPROCESS_UI.get(asr_label, "off")
+        set_setting("asr_audio_preprocess", normalize_asr_preprocess_preset(asr_value))
         set_setting("keep_audio", "1" if self.keep_audio_var.get() else "0")
         set_setting("keep_video", "1" if self.keep_video_var.get() else "0")
         set_setting(

@@ -15,7 +15,7 @@ from database import (
     save_transcription,
 )
 from core.downloader import Downloader
-from core.audio import AudioProcessor
+from core.audio import AudioProcessor, normalize_asr_preprocess_preset
 from core.transcriber import Transcriber
 from core.streaming_downloader import StreamingDownloader
 
@@ -39,6 +39,9 @@ class TranscriberWorker:
         self.last_error = None
         # Ordered list of {transcription_id, video_id} actually persisted this run
         self.produced_results: list = []
+        # Optional freeze from app.jobs snapshot; None → read Settings each call
+        self.asr_audio_preprocess = None
+        self._last_preprocess = None
 
         # Core modules will be initialized lazily or with current settings in each process call
         # but we can also init them here if they don't hold state that changes per request (config changes need to be fetched)
@@ -351,8 +354,9 @@ class TranscriberWorker:
                     )
                     return "skipped"
 
-        # 6. Check Hash
-        audio_hash = self._hash_file(arquivo_wav)
+        # 6. ASR preprocess (once) then hash of effective WAV
+        prep = self._apply_asr_preprocess(arquivo_wav, cfg, audio_processor)
+        audio_hash = prep.audio_hash
         existing_hash = get_transcription_by_audio_hash(audio_hash)
         if existing_hash:
             if not self._confirm_duplicate(
@@ -380,6 +384,7 @@ class TranscriberWorker:
             arquivo_wav, output_dir, video_db_id, audio_hash, start_time, cfg,
             video_path=video_path if cfg["keep_video"] else None,
             archive_audio=archive_audio,
+            preprocess_result=prep,
         )
 
     def processar_arquivo_local(self, file_path):
@@ -441,8 +446,9 @@ class TranscriberWorker:
         if not cfg["keep_audio"]:
             update_video_media(video_db_id, audio_path=None, video_path=video_path)
 
-        # 4. Hash Check
-        audio_hash = self._hash_file(audio_path)
+        # 4. ASR preprocess (once) then hash of effective WAV
+        prep = self._apply_asr_preprocess(audio_path, cfg, audio_processor)
+        audio_hash = prep.audio_hash
         existing_hash = get_transcription_by_audio_hash(audio_hash)
         if existing_hash:
              if not self._confirm_duplicate("Audio ja transcrito", "Reprocessar?"):
@@ -454,8 +460,39 @@ class TranscriberWorker:
         # 5. Transcribe
         return self._run_transcription(
             audio_path, output_dir, video_db_id, audio_hash, start_time, cfg,
-            video_path=video_path
+            video_path=video_path,
+            preprocess_result=prep,
         )
+
+    def _apply_asr_preprocess(self, audio_path, cfg, audio_processor=None):
+        """Apply ASR preprocess once before post-process hash / Whisper."""
+        preset = cfg.get("asr_audio_preprocess") or "off"
+        proc = audio_processor or AudioProcessor(
+            ffmpeg_path=cfg.get("ffmpeg_path") or "ffmpeg",
+            logger=self.log,
+            progress_callback=self._update_progress,
+        )
+        self.progress(
+            {
+                "stage": "audio_preprocess",
+                "message": f"Pré-processamento ASR ({preset})...",
+                "requested_preset": preset,
+            }
+        )
+        result = proc.preprocess_for_asr(
+            audio_path,
+            preset,
+            cancel_check=lambda: self.cancel_requested,
+        )
+        self._last_preprocess = result
+        if result.fallback_reason:
+            self.log(
+                f"⚠️ ASR preprocess fallback: requested={result.requested_preset} "
+                f"applied={result.applied_preset} reason={result.fallback_reason}"
+            )
+        elif result.applied_preset != "off":
+            self.log(f"🎧 ASR preprocess aplicado: {result.applied_preset}")
+        return result
 
     def _run_transcription(
         self,
@@ -467,6 +504,7 @@ class TranscriberWorker:
         cfg,
         video_path=None,
         archive_audio=None,
+        preprocess_result=None,
     ):
         audio_processor = AudioProcessor(logger=self.log)
         duration = audio_processor.get_wav_duration(audio_path)
@@ -533,13 +571,19 @@ class TranscriberWorker:
             except Exception as e:
                 self.log(f"❌ Erro leitura: {e}")
 
+            prep = preprocess_result or self._last_preprocess
             tid = save_transcription(
                 video_db_id,
                 text,
                 segments=transcriber.last_segments,
                 language=cfg["whisper_language"],
                 model=cfg["whisper_model"],
-                audio_hash=audio_hash
+                audio_hash=audio_hash,
+                source_audio_hash=getattr(prep, "source_audio_hash", None),
+                asr_preprocess_requested=getattr(prep, "requested_preset", None),
+                asr_preprocess_applied=getattr(prep, "applied_preset", None),
+                asr_preprocess_filter=getattr(prep, "filter_graph", None),
+                asr_preprocess_fallback_reason=getattr(prep, "fallback_reason", None),
             )
             if tid is not None:
                 self.produced_results.append(
@@ -645,7 +689,20 @@ class TranscriberWorker:
             "whisper_chunk_seconds": self._get_int_setting("whisper_chunk_seconds", 1800),
             "use_streaming_pipeline": get_setting("use_streaming_pipeline") == "1",
             "cookies_path": str(cookies_path) if cookies_path else None,
+            "asr_audio_preprocess": self._resolve_asr_preprocess_preset(),
         }
+
+    def _resolve_asr_preprocess_preset(self):
+        """Prefer job-frozen preset; else Settings; invalid → off (+ warning)."""
+        if self.asr_audio_preprocess is not None:
+            return normalize_asr_preprocess_preset(self.asr_audio_preprocess)
+        raw = get_setting("asr_audio_preprocess")
+        normalized = normalize_asr_preprocess_preset(raw)
+        if raw is not None and str(raw).strip() and str(raw).strip().lower() != normalized:
+            self.log(
+                f"⚠️ asr_audio_preprocess legado/inválido '{raw}' → normalizado para '{normalized}'"
+            )
+        return normalized
 
     def _get_int_setting(self, key, default):
         try:

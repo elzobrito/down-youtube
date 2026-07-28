@@ -66,6 +66,8 @@ DEFAULT_SETTINGS = {
     "rag_default_scope": "video",  # chat default: current video
     "rag_index_on_save": "1",
     "rag_fallback_full_text": "1",
+    # ASR audio preprocess presets: off | light | speech (see docs/plans/PLAN-asr-audio-preprocess.md)
+    "asr_audio_preprocess": "off",
 }
 
 

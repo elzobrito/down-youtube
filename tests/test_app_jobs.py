@@ -69,6 +69,37 @@ def test_create_requires_url_or_path():
         create_job(url="http://a", path="/tmp/b")
 
 
+def test_job_freezes_asr_preprocess_snapshot(monkeypatch):
+    from database import set_setting
+    from app.jobs import create_batch_job
+
+    set_setting("asr_audio_preprocess", "speech")
+    jid = create_job(url="https://example.com/snap", auto_start=False)
+    job = get_job(jid)
+    assert job.options is not None
+    assert job.options.get("asr_audio_preprocess") == "speech"
+
+    # Changing settings after create must not alter the frozen snapshot
+    set_setting("asr_audio_preprocess", "light")
+    job2 = get_job(jid)
+    assert job2.options.get("asr_audio_preprocess") == "speech"
+
+    batch_id = create_batch_job(
+        ["https://example.com/a", "https://example.com/b"],
+        auto_start=False,
+    )
+    batch = get_job(batch_id)
+    assert batch.options.get("asr_audio_preprocess") == "light"
+
+
+def test_legacy_job_without_options_defaults_off():
+    from database import insert_job
+
+    insert_job("legacy-no-opts", "url", "https://example.com/legacy", status="queued")
+    job = get_job("legacy-no-opts")
+    assert job.options == {"asr_audio_preprocess": "off"}
+
+
 def test_update_progress_merges_by_stage():
     from app.jobs import create_job, get_job, update_progress
 

@@ -60,6 +60,9 @@ runners:
   codex:
     display_name: "Codex"
     kind: "llm-agent"
+  grok:
+    display_name: "Grok"
+    kind: "llm-agent"
   human-terminal:
     display_name: "Operador humano via terminal"
     kind: "human"

@@ -117,6 +117,11 @@ def init_database():
 
     _ensure_column(cursor, "transcriptions", "audio_hash", "TEXT")
     _ensure_column(cursor, "transcriptions", "is_used", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "transcriptions", "source_audio_hash", "TEXT")
+    _ensure_column(cursor, "transcriptions", "asr_preprocess_requested", "TEXT")
+    _ensure_column(cursor, "transcriptions", "asr_preprocess_applied", "TEXT")
+    _ensure_column(cursor, "transcriptions", "asr_preprocess_filter", "TEXT")
+    _ensure_column(cursor, "transcriptions", "asr_preprocess_fallback_reason", "TEXT")
 
     cursor.execute(
         """
@@ -218,6 +223,7 @@ def init_database():
     _ensure_column(cursor, "jobs", "result_json", "TEXT")
     _ensure_column(cursor, "jobs", "worker_id", "TEXT")
     _ensure_column(cursor, "jobs", "heartbeat_at", "TIMESTAMP")
+    _ensure_column(cursor, "jobs", "options_json", "TEXT")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)"
     )
@@ -473,6 +479,11 @@ def save_transcription(
     language="pt",
     model="small",
     audio_hash=None,
+    source_audio_hash=None,
+    asr_preprocess_requested=None,
+    asr_preprocess_applied=None,
+    asr_preprocess_filter=None,
+    asr_preprocess_fallback_reason=None,
 ):
     conn = _connect()
     cursor = conn.cursor()
@@ -486,10 +497,27 @@ def save_transcription(
     cursor.execute(
         """
         INSERT INTO transcriptions
-        (video_id, language, full_text, segments_json, word_count, duration_seconds, model_used, audio_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (video_id, language, full_text, segments_json, word_count, duration_seconds,
+         model_used, audio_hash, source_audio_hash,
+         asr_preprocess_requested, asr_preprocess_applied,
+         asr_preprocess_filter, asr_preprocess_fallback_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (video_id, language, text, segments_json, word_count, duration, model, audio_hash),
+        (
+            video_id,
+            language,
+            text,
+            segments_json,
+            word_count,
+            duration,
+            model,
+            audio_hash,
+            source_audio_hash,
+            asr_preprocess_requested,
+            asr_preprocess_applied,
+            asr_preprocess_filter,
+            asr_preprocess_fallback_reason,
+        ),
     )
 
     transcription_id = cursor.lastrowid
@@ -528,6 +556,11 @@ def get_transcription(transcription_id):
             t.duration_seconds AS duration_seconds,
             t.model_used AS model_used,
             t.audio_hash AS audio_hash,
+            t.source_audio_hash AS source_audio_hash,
+            t.asr_preprocess_requested AS asr_preprocess_requested,
+            t.asr_preprocess_applied AS asr_preprocess_applied,
+            t.asr_preprocess_filter AS asr_preprocess_filter,
+            t.asr_preprocess_fallback_reason AS asr_preprocess_fallback_reason,
             t.created_at AS created_at,
             t.updated_at AS updated_at,
             COALESCE(t.is_used, 0) AS is_used,
@@ -559,6 +592,11 @@ def get_transcription(transcription_id):
             "duration": result["duration_seconds"],
             "model": result["model_used"],
             "audio_hash": result["audio_hash"],
+            "source_audio_hash": result["source_audio_hash"],
+            "asr_preprocess_requested": result["asr_preprocess_requested"],
+            "asr_preprocess_applied": result["asr_preprocess_applied"],
+            "asr_preprocess_filter": result["asr_preprocess_filter"],
+            "asr_preprocess_fallback_reason": result["asr_preprocess_fallback_reason"],
             "created_at": result["created_at"],
             "updated_at": result["updated_at"],
             "is_used": result["is_used"],
@@ -1078,6 +1116,7 @@ def insert_job(
     expanded_count=0,
     progress_json=None,
     log_tail=None,
+    options_json=None,
 ):
     conn = _connect()
     cursor = conn.cursor()
@@ -1085,8 +1124,8 @@ def insert_job(
         """
         INSERT INTO jobs (
             id, status, input_type, input_value, expanded_count,
-            progress_json, log_tail, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            progress_json, log_tail, created_at, options_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
@@ -1097,6 +1136,7 @@ def insert_job(
             progress_json,
             log_tail,
             datetime.now(),
+            options_json,
         ),
     )
     conn.commit()
@@ -1113,7 +1153,7 @@ def get_job_row(job_id):
                progress_json, log_tail, error_message,
                result_transcription_id, result_video_id,
                created_at, started_at, finished_at, result_json,
-               worker_id, heartbeat_at
+               worker_id, heartbeat_at, options_json
         FROM jobs WHERE id = ?
         """,
         (job_id,),
@@ -1133,7 +1173,7 @@ def list_job_rows(status=None, limit=50):
                    progress_json, log_tail, error_message,
                    result_transcription_id, result_video_id,
                    created_at, started_at, finished_at, result_json,
-                   worker_id, heartbeat_at
+                   worker_id, heartbeat_at, options_json
             FROM jobs WHERE status = ?
             ORDER BY created_at DESC LIMIT ?
             """,
@@ -1146,7 +1186,7 @@ def list_job_rows(status=None, limit=50):
                    progress_json, log_tail, error_message,
                    result_transcription_id, result_video_id,
                    created_at, started_at, finished_at, result_json,
-                   worker_id, heartbeat_at
+                   worker_id, heartbeat_at, options_json
             FROM jobs
             ORDER BY created_at DESC LIMIT ?
             """,
@@ -1173,6 +1213,7 @@ def update_job_fields(job_id, **fields):
         "heartbeat_at",
         "started_at",
         "finished_at",
+        "options_json",
     }
     cols = []
     vals = []

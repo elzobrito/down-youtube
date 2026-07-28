@@ -229,6 +229,19 @@ def test_best_quality_keep_audio_skips_streaming(monkeypatch, tmp_path):
         def get_wav_duration(self, path):
             return 1.0
 
+        def preprocess_for_asr(self, audio_path, preset="off", *, cancel_check=None):
+            from core.audio import AudioPreprocessResult
+
+            return AudioPreprocessResult(
+                path=audio_path,
+                requested_preset=preset or "off",
+                applied_preset="off",
+                filter_graph=None,
+                fallback_reason=None,
+                source_audio_hash="src1",
+                audio_hash="hash1",
+            )
+
     class FakeTranscriber:
         last_segments = []
         last_error = None
@@ -323,6 +336,19 @@ def test_streaming_still_used_without_keep_audio(monkeypatch, tmp_path):
         def get_wav_duration(self, path):
             return 1.0
 
+        def preprocess_for_asr(self, audio_path, preset="off", *, cancel_check=None):
+            from core.audio import AudioPreprocessResult
+
+            return AudioPreprocessResult(
+                path=audio_path,
+                requested_preset=preset or "off",
+                applied_preset="off",
+                filter_graph=None,
+                fallback_reason=None,
+                source_audio_hash="src2",
+                audio_hash="hash2",
+            )
+
     class FakeTranscriber:
         last_segments = []
         last_error = None
@@ -348,4 +374,106 @@ def test_streaming_still_used_without_keep_audio(monkeypatch, tmp_path):
     result = worker.processar_url("https://www.youtube.com/watch?v=vid")
     assert result == "success"
     assert modes == ["streaming"]
+    Config._instance = None
+
+
+def test_worker_applies_preprocess_once_before_hash(monkeypatch, tmp_path):
+    """Streaming path: preprocess called once; hash uses post-process value."""
+    from core.worker import TranscriberWorker
+    from config import Config
+    from database import init_database, set_setting
+    from core.audio import AudioPreprocessResult
+
+    db = tmp_path / "aq3.db"
+    out = tmp_path / "out"
+    out.mkdir()
+    cfg = Config()
+    monkeypatch.setattr(cfg, "db_path", db)
+    monkeypatch.setattr(cfg, "data_dir", tmp_path)
+    Config._instance = cfg
+    init_database()
+    set_setting("use_streaming_pipeline", "1")
+    set_setting("keep_audio", "0")
+    set_setting("keep_video", "0")
+    set_setting("asr_audio_preprocess", "light")
+    set_setting("output_dir", str(out))
+    set_setting("ffmpeg_path", "ffmpeg")
+    set_setting("whisper_cli", "whisper-cli")
+    set_setting("whisper_model", "tiny")
+
+    wav_path = out / "vid.wav"
+    wav_path.write_bytes(b"RIFF")
+    calls = []
+
+    class FakeStreaming:
+        def __init__(self, *a, **k):
+            pass
+
+        def download_and_convert_streaming(self, *a, **k):
+            return str(wav_path), {"id": "vid", "title": "t", "extractor_key": "Youtube"}
+
+    class FakeDL:
+        last_archive_audio_path = None
+        last_error = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        @staticmethod
+        def resolve_source_site(info, url=""):
+            return Downloader.resolve_source_site(info, url)
+
+    class FakeAudio:
+        def __init__(self, *a, **k):
+            pass
+
+        def normalize_audio(self, path, output_dir):
+            return path
+
+        def get_wav_duration(self, path):
+            return 1.0
+
+        def preprocess_for_asr(self, audio_path, preset="off", *, cancel_check=None):
+            calls.append(preset)
+            return AudioPreprocessResult(
+                path=audio_path,
+                requested_preset="light",
+                applied_preset="light",
+                filter_graph="highpass=f=80",
+                fallback_reason=None,
+                source_audio_hash="source-hash",
+                audio_hash="post-hash",
+            )
+
+    class FakeTranscriber:
+        last_segments = []
+        last_error = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, audio_path, output_dir, duration=None):
+            txt = Path(output_dir) / "out.txt"
+            txt.write_text("ok", encoding="utf-8")
+            return str(txt)
+
+    monkeypatch.setattr("core.worker.StreamingDownloader", FakeStreaming)
+    monkeypatch.setattr("core.worker.Downloader", FakeDL)
+    monkeypatch.setattr("core.worker.AudioProcessor", FakeAudio)
+    monkeypatch.setattr("core.worker.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("core.worker.get_latest_transcription_for_source", lambda **k: None)
+
+    hashes_seen = []
+
+    def capture_hash_lookup(h):
+        hashes_seen.append(h)
+        return None
+
+    monkeypatch.setattr("core.worker.get_transcription_by_audio_hash", capture_hash_lookup)
+
+    worker = TranscriberWorker(lambda m: None, lambda p: None, lambda: None)
+    result = worker.processar_url("https://www.youtube.com/watch?v=vid")
+    assert result == "success"
+    assert calls == ["light"]
+    assert hashes_seen == ["post-hash"]
     Config._instance = None

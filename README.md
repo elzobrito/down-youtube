@@ -428,7 +428,20 @@ with authentication or bot-check errors.
 | Chunk length | `1800` seconds | 30-minute Whisper pieces |
 | Best video quality | Off by default | Settings → “Melhor qualidade de video possivel”; with **Manter video**, uses `bv*+ba/b`, richer YouTube clients, merge **MKV** if needed. Off = legacy `bestvideo+bestaudio` → MP4. |
 | Best audio quality | Off by default | Settings → “Melhor qualidade de audio possivel”: `ba/b` + better clients + sort by bitrate. Always builds **WAV 16 kHz mono** for Whisper; with **Manter audio**, also keeps HQ m4a/opus archive. Off = `bestaudio/best` → WAV. |
+| ASR audio preprocess | `off` by default | Settings → “Pre-processamento ASR”: **Desligado** / **Leve** / **Fala** (`off` / `light` / `speech`). Optional FFmpeg filters before Whisper (loudnorm, light denoise). Does **not** separate music beds or overlapping speakers. For difficult audio prefer a **medium** or **large** Whisper model (no automatic model switch). Snapshot is frozen per job/batch. |
 | Output directory | A user-writable folder | For example `~/Downloads/Transcriptions` on Linux or a user folder on Windows |
+
+### ASR audio preprocess (optional)
+
+Whisper still struggles with loud music and mixed speech. The app can optionally run FFmpeg filters on the **work WAV** (16 kHz mono) before transcription:
+
+| Preset | What it does |
+| --- | --- |
+| `off` | Legacy path — no extra filters (default) |
+| `light` | High-pass / low-pass + loudness normalize |
+| `speech` | Stronger speech band filters + denoise + dynamic norm (falls back to `light`/`off` if FFmpeg filters fail) |
+
+Provenance (`source_audio_hash`, applied preset, filter graph) is stored with the transcription. Original local files, downloaded videos, and HQ audio archives are never modified — only the work WAV.
 
 Configure these paths in the app instead of hard-coding platform-specific
 defaults:
@@ -454,6 +467,7 @@ defaults:
 | Ollama does not connect | Confirm that `ollama serve` is running and the configured model exists |
 | Chat returns no response | Check the Ollama URL, model name, and server logs |
 | Transcript ends with endless repeated phrases | Enable chunking (defaults on for >60 min) and reprocess; use a better Whisper model if ASR quality is still poor |
+| Poor ASR with background music/noise | Try Settings → Pre-processamento ASR → Leve or Fala; use medium/large model. Filters do not separate music or overlapping voices |
 | `maximum recursion depth exceeded` on long audio | Fixed in current tree: chunk progress must not re-enter the progress callback; pull latest `core/transcriber.py` |
 | Playlist only processes one video | Use a pure `playlist?list=` URL, or enable expand for `watch?v=&list=`; each item still downloads with `noplaylist` |
 
