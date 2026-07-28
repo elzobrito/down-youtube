@@ -50,6 +50,9 @@ class YouTubeTranscriberApp:
         self.active_job_id = None
         self._poll_log_len = 0
         self._poll_after_id = None
+        self._stats_output_dir = None
+        self._stats_disk_baseline_mb = 0.0
+        self._last_download_mb = 0.0
 
         self._create_menu()
         self._create_notebook()
@@ -239,14 +242,73 @@ class YouTubeTranscriberApp:
             self._log("⏳ Cancelando job…")
 
     def _begin_job_watch(self, job_id: str):
+        from utils.runtime_stats import path_size_mb
+
         self.active_job_id = job_id
         self._poll_log_len = 0
+        self._last_download_mb = 0.0
+        try:
+            out = get_setting("output_dir")
+            self._stats_output_dir = str(out) if out else None
+            self._stats_disk_baseline_mb = path_size_mb(self._stats_output_dir)
+        except Exception:
+            self._stats_output_dir = None
+            self._stats_disk_baseline_mb = 0.0
+        # Prime CPU sampler (first call establishes baseline)
+        try:
+            from utils.runtime_stats import process_cpu_percent
+
+            process_cpu_percent()
+        except Exception:
+            pass
         if self._poll_after_id is not None:
             try:
                 self.root.after_cancel(self._poll_after_id)
             except Exception:
                 pass
         self._poll_job()
+
+    def _refresh_general_stats(self, job=None):
+        """Fill Disk / Threads / CPU while a job runs (time already ticks via progress)."""
+        from utils.runtime_stats import (
+            dir_delta_mb,
+            process_cpu_percent,
+            process_thread_count,
+        )
+
+        try:
+            # Disk: prefer download bytes, else growth under output_dir
+            disk_mb = self._last_download_mb
+            if disk_mb <= 0 and self._stats_output_dir:
+                disk_mb = dir_delta_mb(self._stats_output_dir, self._stats_disk_baseline_mb)
+            self.download_tab.stats_panel.update_disk(disk_mb)
+
+            threads = process_thread_count()
+            total = os.cpu_count() or None
+            # Prefer configured whisper threads when known from progress
+            whisper_t = None
+            if job and isinstance(job.progress, dict):
+                by = job.progress.get("by_stage") or {}
+                tr = by.get("transcription") or {}
+                if tr.get("threads"):
+                    whisper_t = tr.get("threads")
+            if whisper_t:
+                self.download_tab.stats_panel.update_threads(whisper_t, total)
+            else:
+                self.download_tab.stats_panel.update_threads(threads, total)
+
+            cpu = process_cpu_percent()
+            self.download_tab.stats_panel.update_cpu(cpu)
+
+            # Network: last download speed if any
+            if job and isinstance(job.progress, dict):
+                by = job.progress.get("by_stage") or {}
+                dl = by.get("download") or {}
+                speed = dl.get("speed")
+                if speed and speed not in ("-", "N/A"):
+                    self.download_tab.stats_panel.update_network(str(speed))
+        except Exception:
+            pass
 
     def _poll_job(self):
         """Poll app.jobs for log/progress and completion (UI thread)."""
@@ -271,6 +333,10 @@ class YouTubeTranscriberApp:
         if job.progress:
             self._apply_progress_state(job.progress)
 
+        # Always refresh general stats while job is active
+        if job.status in ("queued", "running"):
+            self._refresh_general_stats(job)
+
         if job.status in ("done", "failed", "cancelled"):
             if job.status == "failed" and job.error_message:
                 self.download_tab.log_message(f"❌ {job.error_message}", "error")
@@ -278,6 +344,8 @@ class YouTubeTranscriberApp:
                 self.download_tab.log_message("⚠️ Job cancelado", "warning")
             elif job.status == "done":
                 self.download_tab.log_message("✅ Job concluído", "success")
+            # Final stats snapshot before clearing
+            self._refresh_general_stats(job)
             self._finish_processing(success=(job.status == "done"))
             return
 
@@ -344,28 +412,47 @@ class YouTubeTranscriberApp:
             if getattr(self.download_tab, "current_mode", None) != mode:
                 self.download_tab.set_pipeline_mode(mode)
         elif stage == "download":
+            downloaded = message.get("downloaded_mb", 0) or 0
+            total = message.get("total_mb", 0) or 0
+            if downloaded:
+                self._last_download_mb = float(downloaded)
+            elif total:
+                self._last_download_mb = float(total)
             self.download_tab.update_download_progress(
                 percent=int(message.get("percent", 0) or 0),
                 speed=message.get("speed", "-"),
                 eta=message.get("eta", "-"),
-                downloaded=message.get("downloaded_mb", 0) or 0,
-                total=message.get("total_mb", 0) or 0,
+                downloaded=downloaded,
+                total=total,
             )
+            if self._last_download_mb > 0:
+                self.download_tab.stats_panel.update_disk(self._last_download_mb)
+            speed = message.get("speed")
+            if speed and speed not in ("-", "N/A"):
+                self.download_tab.stats_panel.update_network(str(speed))
         elif stage == "conversion":
+            size = message.get("size_mb", 0) or 0
+            if size:
+                self._last_download_mb = max(self._last_download_mb, float(size))
+                self.download_tab.stats_panel.update_disk(self._last_download_mb)
             self.download_tab.update_conversion_progress(
                 percent=int(message.get("percent", 0) or 0),
                 format_info=message.get("format", "PCM 16kHz Mono"),
                 speed=message.get("speed", "1.0"),
-                size=message.get("size_mb", 0) or 0,
+                size=size,
             )
         elif stage == "transcription":
+            threads = message.get("threads", 0) or 0
             self.download_tab.update_transcription_progress(
                 percent=int(message.get("percent", 0) or 0),
                 elapsed=message.get("elapsed", "00:00"),
                 model=message.get("model", ""),
-                threads=message.get("threads", 0) or 0,
+                threads=threads,
                 words=message.get("words", 0) or 0,
             )
+            if threads:
+                total = os.cpu_count() or None
+                self.download_tab.stats_panel.update_threads(threads, total)
         elif stage == "stats":
             self.download_tab.update_stats(**message)
         elif stage == "nerd_download":

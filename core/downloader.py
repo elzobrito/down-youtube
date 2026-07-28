@@ -372,21 +372,40 @@ class Downloader:
             speed = d.get("_speed_str", "-").strip()
             eta = d.get("_eta_str", "-").strip()
             percent = self._parse_percent(percent_raw)
+            downloaded_mb = 0.0
+            total_mb = 0.0
+            try:
+                downloaded = d.get("downloaded_bytes") or 0
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                downloaded_mb = float(downloaded) / (1024 * 1024)
+                total_mb = float(total) / (1024 * 1024) if total else 0.0
+            except Exception:
+                pass
             self.progress_callback(
                 {
                     "stage": "download",
                     "percent": percent,
                     "speed": speed,
                     "eta": eta,
+                    "downloaded_mb": downloaded_mb,
+                    "total_mb": total_mb,
                 }
             )
         elif status == "finished":
+            downloaded_mb = 0.0
+            try:
+                downloaded = d.get("downloaded_bytes") or d.get("total_bytes") or 0
+                downloaded_mb = float(downloaded) / (1024 * 1024)
+            except Exception:
+                pass
             self.progress_callback(
                 {
                     "stage": "download",
                     "percent": 100,
                     "speed": "-",
                     "eta": "0s",
+                    "downloaded_mb": downloaded_mb,
+                    "total_mb": downloaded_mb,
                 }
             )
 

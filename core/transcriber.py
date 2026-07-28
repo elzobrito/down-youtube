@@ -313,6 +313,8 @@ class Transcriber:
                         "stage": "transcription",
                         "percent": percent,
                         "elapsed": self._format_elapsed(elapsed),
+                        "model": self.model_path or "",
+                        "threads": self.threads or 0,
                     }
                 )
                 time.sleep(0.5)
@@ -325,7 +327,11 @@ class Transcriber:
                     {
                         "stage": "transcription",
                         "percent": 100,
-                        "elapsed": self._format_elapsed(time.perf_counter() - start_time),
+                        "elapsed": self._format_elapsed(
+                            time.perf_counter() - start_time
+                        ),
+                        "model": self.model_path or "",
+                        "threads": self.threads or 0,
                     }
                 )
                 arquivo_txt = self._find_output_txt(audio_path, output_dir)
