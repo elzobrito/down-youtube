@@ -24,7 +24,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from config import Config
-from database import get_setting, get_transcription, set_setting
+from database import (
+    claim_next_rag_job,
+    enqueue_rag_job,
+    finish_rag_job,
+    get_setting,
+    get_transcription,
+    import_legacy_rag_jsonl_once,
+    init_database,
+    set_setting,
+)
 
 FILENAME_RE = re.compile(r"^t-(\d+)\.md$")
 
@@ -346,41 +355,62 @@ def enrich_hits(hits: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return enriched
 
 
+def _ensure_rag_queue_ready() -> None:
+    """Ensure app DB tables exist and legacy JSONL was imported once."""
+    init_database()
+    try:
+        import_legacy_rag_jsonl_once(queue_path())
+    except Exception:
+        # Never block indexing if legacy import fails
+        pass
+
+
 def _queue_append(job: Dict[str, Any]) -> None:
-    job = dict(job)
-    job.setdefault("ts", _utc_now())
-    job.setdefault("status", "pending")
-    job.setdefault("attempts", 0)
-    line = json.dumps(job, ensure_ascii=False) + "\n"
-    with writer_lock():
-        with queue_path().open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
+    """Append to transactional SQLite queue (legacy JSONL append kept as audit only)."""
+    _ensure_rag_queue_ready()
+    tid = int(job["transcription_id"])
+    op = job.get("op") or "index"
+    enqueue_rag_job(tid, op=op)
+    # Best-effort audit trail in legacy JSONL (does not drive processing)
+    try:
+        audit = dict(job)
+        audit.setdefault("ts", _utc_now())
+        audit.setdefault("status", "queued")
+        line = json.dumps(audit, ensure_ascii=False) + "\n"
+        with writer_lock():
+            with queue_path().open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except Exception:
+        pass
 
 
 def _queue_read_all() -> List[Dict[str, Any]]:
-    path = queue_path()
-    if not path.exists():
-        return []
+    """Read pending-ish jobs from SQLite (compat for tests/tools)."""
+    _ensure_rag_queue_ready()
+    from database import list_rag_job_rows
+
+    rows = list_rag_job_rows(limit=1000)
     jobs = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            jobs.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    for r in rows:
+        jobs.append(
+            {
+                "id": r[0],
+                "transcription_id": r[1],
+                "op": r[2],
+                "status": r[3],
+                "attempts": r[4],
+                "last_error": r[5],
+                "last_result": r[6],
+            }
+        )
     return jobs
 
 
 def _queue_rewrite(jobs: List[Dict[str, Any]]) -> None:
-    lines = [json.dumps(j, ensure_ascii=False) for j in jobs]
-    payload = "\n".join(lines)
-    if payload:
-        payload += "\n"
-    _atomic_write_text(queue_path(), payload)
+    """No-op rewrite: SQLite is source of truth; kept for API compatibility."""
+    return None
 
 
 def enqueue_index(transcription_id: int) -> None:
@@ -388,13 +418,13 @@ def enqueue_index(transcription_id: int) -> None:
         return
     if (get_setting("rag_index_on_save") or "1") != "1":
         return
-    _queue_append({"transcription_id": int(transcription_id), "op": "index", "status": "pending"})
+    _queue_append({"transcription_id": int(transcription_id), "op": "index", "status": "queued"})
 
 
 def enqueue_forget(transcription_id: int) -> None:
     if not is_rag_enabled():
         return
-    _queue_append({"transcription_id": int(transcription_id), "op": "forget", "status": "pending"})
+    _queue_append({"transcription_id": int(transcription_id), "op": "forget", "status": "queued"})
 
 
 def project_transcription(transcription_id: int) -> Dict[str, Any]:
@@ -551,50 +581,83 @@ def index_library(*, prune: bool = False, force: bool = False) -> Dict[str, Any]
     return {"ok": True, "results": results, "count": len(results)}
 
 
-def process_queue(*, max_jobs: int = 100) -> Dict[str, Any]:
+def process_queue(
+    *,
+    max_jobs: int = 100,
+    stale_running_seconds: int = 900,
+    max_attempts: int = 3,
+    retry_base_seconds: int = 30,
+) -> Dict[str, Any]:
+    """Process RAG jobs via atomic SQLite claims.
+
+    Concurrent enqueue_index during this call inserts new rows that remain
+    queued and are picked up on a later process_queue invocation — never
+    discarded by a full-file rewrite.
+    """
     if not is_rag_enabled():
         return {"ok": True, "processed": 0, "skipped": "rag_disabled"}
     ensure_memory_base()
-    with writer_lock():
-        jobs = _queue_read_all()
+    _ensure_rag_queue_ready()
     processed = []
-    remaining = []
     count = 0
-    for job in jobs:
-        if count >= max_jobs:
-            remaining.append(job)
-            continue
-        if job.get("status") not in {"pending", "error"}:
-            # keep done jobs briefly? drop done
-            if job.get("status") == "done":
-                continue
-            remaining.append(job)
-            continue
+    while count < max_jobs:
+        job = claim_next_rag_job(
+            stale_running_seconds=stale_running_seconds,
+            max_attempts=max_attempts,
+        )
+        if not job:
+            break
         tid = int(job["transcription_id"])
         op = job.get("op") or "index"
-        job["attempts"] = int(job.get("attempts") or 0) + 1
         try:
             if op == "forget":
                 out = forget_transcription(tid)
             else:
                 out = index_transcription(tid)
             if out.get("status") in {"error"}:
+                retry_delay = min(
+                    3600,
+                    max(1, int(retry_base_seconds))
+                    * (2 ** max(0, int(job.get("attempts") or 1) - 1)),
+                )
+                finish_rag_job(
+                    job["id"],
+                    status="error",
+                    last_error=str(out.get("error") or "error"),
+                    last_result=out.get("status"),
+                    retry_delay_seconds=retry_delay,
+                )
                 job["status"] = "error"
                 job["last_error"] = out.get("error")
-                remaining.append(job)
             else:
+                finish_rag_job(
+                    job["id"],
+                    status="done",
+                    last_result=out.get("status"),
+                )
                 job["status"] = "done"
                 job["last_result"] = out.get("status")
                 processed.append(job)
             count += 1
         except Exception as exc:
+            retry_delay = min(
+                3600,
+                max(1, int(retry_base_seconds))
+                * (2 ** max(0, int(job.get("attempts") or 1) - 1)),
+            )
+            finish_rag_job(
+                job["id"],
+                status="error",
+                last_error=str(exc),
+                retry_delay_seconds=retry_delay,
+            )
             job["status"] = "error"
             job["last_error"] = str(exc)
-            remaining.append(job)
             count += 1
-    with writer_lock():
-        _queue_rewrite(remaining)
-    return {"ok": True, "processed": len(processed), "remaining": len(remaining), "jobs": processed}
+    from database import count_rag_jobs_by_status
+
+    remaining = count_rag_jobs_by_status("queued") + count_rag_jobs_by_status("error")
+    return {"ok": True, "processed": len(processed), "remaining": remaining, "jobs": processed}
 
 
 def reconcile(*, process_pending: bool = True) -> Dict[str, Any]:

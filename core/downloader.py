@@ -86,25 +86,14 @@ class Downloader:
 
     @staticmethod
     def resolve_source_site(info: Optional[dict], url: str = "") -> str:
-        """Prefer yt-dlp extractor_key; fall back to host or 'unknown' (not always youtube)."""
-        if info:
-            key = info.get("extractor_key") or info.get("extractor")
-            if key:
-                return str(key).lower()
-        raw = (url or "").strip()
-        if not raw:
-            return "unknown"
-        if is_youtube_url(raw):
-            return "youtube"
-        try:
-            host = (urlparse(raw).netloc or "").lower()
-            if host.startswith("www."):
-                host = host[4:]
-            if host:
-                return host.split(":")[0]
-        except Exception:
-            pass
-        return "unknown"
+        """Prefer yt-dlp extractor_key; fall back to host or 'unknown' (not always youtube).
+
+        YouTube extractor variants (Youtube, youtube:tab, YoutubeYtBe, …) and
+        hosts collapse to the canonical key 'youtube' so identity is stable.
+        """
+        from database import normalize_source_site
+
+        return normalize_source_site(info=info, url=url)
 
     def _common_http_headers(self):
         return {

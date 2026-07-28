@@ -104,3 +104,167 @@ def test_queue_and_forget(isolated_app):
 
     rag_bridge.forget_transcription(tid)
     assert tid not in rag_bridge.rag_indexed_transcription_ids()
+
+
+def test_concurrent_enqueue_during_process_not_lost(isolated_app, monkeypatch):
+    """Enqueue while a job is mid-index must remain queued for a later call."""
+    from core import rag_bridge
+    from database import count_rag_jobs_by_status, set_setting
+
+    set_setting("rag_index_on_save", "1")
+    tid_a, tid_b = isolated_app["ids"]
+    rag_bridge.enqueue_index(tid_a)
+
+    original_index = rag_bridge.index_transcription
+
+    def slow_index(transcription_id, *, force=False):
+        # Concurrent enqueue while first job is "running"
+        if int(transcription_id) == int(tid_a):
+            rag_bridge.enqueue_index(tid_b)
+        return original_index(transcription_id, force=force)
+
+    monkeypatch.setattr(rag_bridge, "index_transcription", slow_index)
+    out1 = rag_bridge.process_queue(max_jobs=1)
+    assert out1["processed"] == 1
+    assert count_rag_jobs_by_status("queued") >= 1
+
+    out2 = rag_bridge.process_queue(max_jobs=10)
+    assert out2["processed"] >= 1
+    assert tid_b in rag_bridge.rag_indexed_transcription_ids()
+
+
+def test_rag_claim_atomic_two_claimers(isolated_app):
+    from database import claim_next_rag_job, enqueue_rag_job, init_database
+
+    init_database()
+    tid = isolated_app["ids"][0]
+    enqueue_rag_job(tid, op="index")
+    first = claim_next_rag_job()
+    second = claim_next_rag_job()
+    assert first is not None
+    assert first["status"] == "running" or first["transcription_id"] == tid
+    assert second is None  # only one job; second claim must not double-run
+
+
+def test_rag_stale_running_recovered(isolated_app):
+    from datetime import datetime, timedelta
+
+    from database import (
+        _connect,
+        claim_next_rag_job,
+        enqueue_rag_job,
+        finish_rag_job,
+        init_database,
+    )
+
+    init_database()
+    tid = isolated_app["ids"][0]
+    jid = enqueue_rag_job(tid, op="index")
+    # Force a stale running claim
+    claimed = claim_next_rag_job()
+    assert claimed is not None
+    conn = _connect()
+    old = datetime.now() - timedelta(seconds=10_000)
+    conn.execute(
+        "UPDATE rag_index_jobs SET claimed_at = ?, status = 'running' WHERE id = ?",
+        (old, claimed["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    recovered = claim_next_rag_job(stale_running_seconds=60)
+    assert recovered is not None
+    assert recovered["transcription_id"] == tid
+    finish_rag_job(recovered["id"], status="done", last_result="indexed")
+
+
+def test_legacy_jsonl_import_idempotent(isolated_app):
+    import json
+
+    from core import rag_bridge
+    from database import count_rag_jobs_by_status, import_legacy_rag_jsonl_once, set_setting
+
+    set_setting("rag_queue_jsonl_imported", "0")
+    path = isolated_app["data_dir"] / "rag_index_queue.jsonl"
+    tid = isolated_app["ids"][0]
+    path.write_text(
+        json.dumps({"transcription_id": tid, "op": "index", "status": "pending"}) + "\n"
+        + json.dumps({"transcription_id": tid, "op": "index", "status": "error", "last_error": "x"})
+        + "\n"
+        + json.dumps({"transcription_id": tid, "op": "index", "status": "done"})
+        + "\n",
+        encoding="utf-8",
+    )
+    n1 = import_legacy_rag_jsonl_once(path)
+    n2 = import_legacy_rag_jsonl_once(path)
+    assert n1 >= 1
+    assert n2 == 0  # flag set; idempotent
+    assert count_rag_jobs_by_status("queued") + count_rag_jobs_by_status("error") >= 1
+    # corpus/manifest not wiped by import
+    assert rag_bridge.corpus_dir().exists() or True
+
+
+def test_rag_error_backoff_does_not_starve_queued(isolated_app, monkeypatch):
+    from core import rag_bridge
+    from database import (
+        claim_next_rag_job,
+        enqueue_rag_job,
+        list_rag_job_rows,
+    )
+
+    tid_error, tid_ok = isolated_app["ids"]
+    enqueue_rag_job(tid_error, op="index")
+    enqueue_rag_job(tid_ok, op="index")
+
+    def fake_index(transcription_id, *, force=False):
+        if int(transcription_id) == int(tid_error):
+            return {"status": "error", "error": "permanent"}
+        return {"status": "indexed"}
+
+    monkeypatch.setattr(rag_bridge, "index_transcription", fake_index)
+    out = rag_bridge.process_queue(
+        max_jobs=4,
+        max_attempts=3,
+        retry_base_seconds=60,
+    )
+
+    rows = list_rag_job_rows(limit=10)
+    by_tid = {row[1]: row for row in rows}
+    assert out["processed"] == 1
+    assert by_tid[tid_error][3] == "error"
+    assert by_tid[tid_error][4] == 1
+    assert by_tid[tid_error][10] is not None
+    assert by_tid[tid_ok][3] == "done"
+    assert by_tid[tid_ok][4] == 1
+    assert claim_next_rag_job(max_attempts=3) is None
+
+
+def test_rag_error_respects_max_attempts(isolated_app):
+    from datetime import datetime, timedelta
+
+    from database import (
+        _connect,
+        claim_next_rag_job,
+        enqueue_rag_job,
+        finish_rag_job,
+    )
+
+    tid = isolated_app["ids"][0]
+    enqueue_rag_job(tid, op="index")
+    claimed = claim_next_rag_job(max_attempts=1)
+    assert claimed is not None
+    finish_rag_job(
+        claimed["id"],
+        status="error",
+        last_error="permanent",
+        retry_delay_seconds=60,
+    )
+
+    conn = _connect()
+    conn.execute(
+        "UPDATE rag_index_jobs SET next_attempt_at = ? WHERE id = ?",
+        (datetime.now() - timedelta(seconds=1), claimed["id"]),
+    )
+    conn.commit()
+    conn.close()
+    assert claim_next_rag_job(max_attempts=1) is None

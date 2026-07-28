@@ -37,6 +37,8 @@ class TranscriberWorker:
         self.running = False
         self.cancel_requested = False
         self.last_error = None
+        # Ordered list of {transcription_id, video_id} actually persisted this run
+        self.produced_results: list = []
 
         # Core modules will be initialized lazily or with current settings in each process call
         # but we can also init them here if they don't hold state that changes per request (config changes need to be fetched)
@@ -47,6 +49,7 @@ class TranscriberWorker:
     def processar_lista(self, urls, expand_watch_list=False):
         self.running = True
         self.cancel_requested = False
+        self.produced_results = []
 
         # Expand playlists into individual watch URLs; keep noplaylist on each download
         from core.url_resolver import expand_input_urls
@@ -136,6 +139,7 @@ class TranscriberWorker:
             "failed": falha,
             "skipped": pulado,
             "cancelled": self.cancel_requested,
+            "results": list(self.produced_results),
         }
 
     def _notify(self, title, message, success=True):
@@ -201,14 +205,29 @@ class TranscriberWorker:
         video_path = None
         info = None
         archive_audio = None  # high-quality audio archive (best quality + keep_audio)
-        
-        use_streaming = cfg.get("use_streaming_pipeline", False) and not cfg["keep_video"]
-        
+
+        # HQ preserve path: best quality + keep_audio must use traditional download
+        # so the original M4A/Opus is kept; streaming only produces WAV.
+        preserve_hq_audio = bool(
+            cfg.get("audio_download_best_quality", False) and cfg.get("keep_audio", False)
+        )
+        use_streaming = (
+            cfg.get("use_streaming_pipeline", False)
+            and not cfg["keep_video"]
+            and not preserve_hq_audio
+        )
+        if preserve_hq_audio and cfg.get("use_streaming_pipeline", False):
+            self.log(
+                "🎧 best_quality+keep_audio: pipeline tradicional para preservar áudio HQ"
+            )
+
         # Notificar modo do pipeline
         if use_streaming:
             self.progress({"stage": "pipeline_mode", "mode": "streaming"})
         elif cfg["keep_video"]:
             self.progress({"stage": "pipeline_mode", "mode": "video"})
+        elif preserve_hq_audio:
+            self.progress({"stage": "pipeline_mode", "mode": "traditional_hq"})
         else:
             self.progress({"stage": "pipeline_mode", "mode": "traditional"})
         
@@ -289,6 +308,7 @@ class TranscriberWorker:
         self.log(f"✅ Download: {info.get('title') if info else 'audio'}")
         
         # 4. Save Video Info
+        source_site = Downloader.resolve_source_site(info, url)
         video_db_id = add_video(
             url,
             video_id=(info or {}).get("id"),
@@ -298,15 +318,18 @@ class TranscriberWorker:
             thumbnail_url=(info or {}).get("thumbnail"),
             audio_path=arquivo_wav if cfg["keep_audio"] else None,
             video_path=video_path if cfg["keep_video"] else None,
-            source_site=Downloader.resolve_source_site(info, url),
+            source_site=source_site,
         )
         
         if not cfg["keep_audio"]:
             update_video_media(video_db_id, audio_path=None, video_path=video_path if cfg["keep_video"] else None)
 
-        # 5. Check duplicate video ID if URL was new
+        # 5. Check duplicate video ID if URL was new (scoped by source_site)
         if not existing_url:
-            existing_video = get_latest_transcription_for_source(video_id=(info or {}).get("id"))
+            existing_video = get_latest_transcription_for_source(
+                video_id=(info or {}).get("id"),
+                source_site=source_site,
+            )
             if existing_video:
                 if not self._confirm_duplicate(
                     "Transcricao existente",
@@ -510,7 +533,7 @@ class TranscriberWorker:
             except Exception as e:
                 self.log(f"❌ Erro leitura: {e}")
 
-            save_transcription(
+            tid = save_transcription(
                 video_db_id,
                 text,
                 segments=transcriber.last_segments,
@@ -518,6 +541,13 @@ class TranscriberWorker:
                 model=cfg["whisper_model"],
                 audio_hash=audio_hash
             )
+            if tid is not None:
+                self.produced_results.append(
+                    {
+                        "transcription_id": int(tid),
+                        "video_id": int(video_db_id) if video_db_id is not None else None,
+                    }
+                )
             add_history(
                 video_db_id, "sucesso", output_file=arquivo_txt,
                 audio_path=audio_path if cfg["keep_audio"] else None,

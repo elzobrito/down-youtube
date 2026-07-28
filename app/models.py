@@ -14,7 +14,7 @@ JOB_STATUSES = frozenset({"queued", "running", "done", "failed", "cancelled"})
 class Job:
     id: str
     status: str
-    input_type: str  # url | local
+    input_type: str  # url | local | batch
     input_value: str
     expanded_count: int = 0
     progress: Optional[Dict[str, Any]] = None
@@ -22,6 +22,7 @@ class Job:
     error_message: Optional[str] = None
     result_transcription_id: Optional[int] = None
     result_video_id: Optional[int] = None
+    results: Optional[List[Dict[str, Any]]] = None
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -36,7 +37,14 @@ class Job:
 
 
 def job_from_row(row) -> Job:
-    """Map database row (tuple) to Job."""
+    """Map database row (tuple) to Job.
+
+    Columns:
+      0 id, 1 status, 2 input_type, 3 input_value, 4 expanded_count,
+      5 progress_json, 6 log_tail, 7 error_message,
+      8 result_transcription_id, 9 result_video_id,
+      10 created_at, 11 started_at, 12 finished_at, 13 result_json (optional)
+    """
     import json
 
     progress = None
@@ -45,6 +53,15 @@ def job_from_row(row) -> Job:
             progress = json.loads(row[5])
         except Exception:
             progress = {"raw": row[5]}
+
+    results = None
+    if len(row) > 13 and row[13]:
+        try:
+            parsed = json.loads(row[13])
+            if isinstance(parsed, list):
+                results = parsed
+        except Exception:
+            results = None
 
     return Job(
         id=row[0],
@@ -57,6 +74,7 @@ def job_from_row(row) -> Job:
         error_message=row[7],
         result_transcription_id=row[8],
         result_video_id=row[9],
+        results=results,
         created_at=row[10],
         started_at=row[11],
         finished_at=row[12],

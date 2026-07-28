@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import Config, DEFAULT_SETTINGS
@@ -206,17 +206,67 @@ def init_database():
             error_message TEXT,
             result_transcription_id INTEGER,
             result_video_id INTEGER,
+            result_json TEXT,
+            worker_id TEXT,
+            heartbeat_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             started_at TIMESTAMP,
             finished_at TIMESTAMP
         )
         """
     )
+    _ensure_column(cursor, "jobs", "result_json", "TEXT")
+    _ensure_column(cursor, "jobs", "worker_id", "TEXT")
+    _ensure_column(cursor, "jobs", "heartbeat_at", "TIMESTAMP")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)"
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)"
+    )
+
+    # Transactional RAG index queue (replaces rewrite-all JSONL processing)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rag_index_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transcription_id INTEGER NOT NULL,
+            op TEXT NOT NULL DEFAULT 'index',
+            status TEXT NOT NULL DEFAULT 'queued',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_result TEXT,
+            claimed_at TIMESTAMP,
+            next_attempt_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    _ensure_column(cursor, "rag_index_jobs", "next_attempt_at", "TIMESTAMP")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rag_jobs_status ON rag_index_jobs(status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rag_jobs_tid ON rag_index_jobs(transcription_id)"
+    )
+
+    _ensure_column(cursor, "videos", "source_site", "TEXT DEFAULT 'youtube'")
+    # Canonicalize every legacy value before the compound identity is used.
+    cursor.execute("SELECT id, url, source_site FROM videos")
+    for row_id, row_url, current_site in cursor.fetchall():
+        canonical_site = normalize_source_site(
+            source_site=current_site,
+            url=row_url,
+        )
+        if canonical_site != (current_site or ""):
+            cursor.execute(
+                "UPDATE videos SET source_site = ? WHERE id = ?",
+                (canonical_site, row_id),
+            )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_videos_site_vid "
+        "ON videos(source_site, video_id)"
     )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_videos_title ON videos(title)")
@@ -236,6 +286,52 @@ def init_database():
 
     conn.commit()
     conn.close()
+
+
+def normalize_source_site(source_site=None, url=None, info=None):
+    """Deterministic platform identity key.
+
+    YouTube extractor variants and hosts collapse to 'youtube'.
+    """
+    raw = None
+    if info and isinstance(info, dict):
+        raw = info.get("extractor_key") or info.get("extractor")
+    if not raw and source_site:
+        raw = source_site
+    if raw:
+        key = str(raw).strip().lower()
+        # yt-dlp keys: Youtube, youtube:tab, YoutubeYtBe, etc.
+        if key.startswith("youtube") or key in {"youtu.be", "youtube.com", "www.youtube.com"}:
+            return "youtube"
+        if key in {"vimeo", "vimeo.com", "www.vimeo.com", "player.vimeo.com"}:
+            return "vimeo"
+        if key in {"soundcloud", "soundcloud.com", "www.soundcloud.com"}:
+            return "soundcloud"
+        if key and key not in {"unknown", "none", "null"}:
+            # drop nested extractor suffixes like "vimeo:user"
+            return key.split(":")[0]
+    if url:
+        try:
+            from urllib.parse import urlparse
+            from core.url_resolver import is_youtube_url
+
+            if is_youtube_url(url):
+                return "youtube"
+            host = (urlparse(url).netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            host = host.split(":")[0]
+            if host in {"youtu.be", "youtube.com", "m.youtube.com", "music.youtube.com"}:
+                return "youtube"
+            if host == "vimeo.com" or host.endswith(".vimeo.com"):
+                return "vimeo"
+            if host == "soundcloud.com" or host.endswith(".soundcloud.com"):
+                return "soundcloud"
+            if host:
+                return host
+        except Exception:
+            pass
+    return "unknown"
 
 
 def get_setting(key):
@@ -267,22 +363,43 @@ def add_video(
     thumbnail_url=None,
     audio_path=None,
     video_path=None,
-    source_site="youtube",
+    source_site=None,
 ):
     conn = _connect()
     cursor = conn.cursor()
 
+    site = normalize_source_site(source_site=source_site, url=url)
+
+    # Identity: (source_site, video_id) when video_id present; else exact URL.
+    # Never merge cross-site records that share only video_id.
+    row = None
     if video_id:
         cursor.execute(
-            "SELECT id FROM videos WHERE video_id = ? OR url = ?",
-            (video_id, url),
+            """
+            SELECT id FROM videos
+            WHERE source_site = ? AND video_id = ?
+            LIMIT 1
+            """,
+            (site, video_id),
         )
-    else:
-        cursor.execute("SELECT id FROM videos WHERE url = ?", (url,))
+        row = cursor.fetchone()
+    if not row and url:
+        cursor.execute(
+            """
+            SELECT id FROM videos
+            WHERE url = ? AND COALESCE(source_site, 'youtube') = ?
+            LIMIT 1
+            """,
+            (url, site),
+        )
+        row = cursor.fetchone()
+    if not row and url and not video_id:
+        cursor.execute("SELECT id FROM videos WHERE url = ? LIMIT 1", (url,))
+        row = cursor.fetchone()
 
-    row = cursor.fetchone()
     if row:
         video_db_id = row[0]
+        site_update = None if site == "unknown" else site
         cursor.execute(
             """
             UPDATE videos
@@ -291,7 +408,9 @@ def add_video(
                 duration = COALESCE(?, duration),
                 thumbnail_url = COALESCE(?, thumbnail_url),
                 audio_path = COALESCE(?, audio_path),
-                video_path = COALESCE(?, video_path)
+                video_path = COALESCE(?, video_path),
+                source_site = COALESCE(?, source_site),
+                video_id = COALESCE(?, video_id)
             WHERE id = ?
             """,
             (
@@ -301,6 +420,8 @@ def add_video(
                 thumbnail_url,
                 to_storage_path(audio_path),
                 to_storage_path(video_path),
+                site_update,
+                video_id,
                 video_db_id,
             ),
         )
@@ -320,7 +441,7 @@ def add_video(
                 thumbnail_url,
                 to_storage_path(audio_path),
                 to_storage_path(video_path),
-                source_site,
+                site,
             ),
         )
         video_db_id = cursor.lastrowid
@@ -468,34 +589,64 @@ def get_transcription_by_video(video_id):
     return result
 
 
-def get_latest_transcription_for_source(video_id=None, url=None):
+def get_latest_transcription_for_source(video_id=None, url=None, source_site=None):
     conn = _connect()
     cursor = conn.cursor()
 
-    if video_id:
+    site = normalize_source_site(source_site=source_site, url=url) if (source_site or url) else None
+
+    if video_id and site:
+        cursor.execute(
+            """
+            SELECT t.id, t.created_at
+            FROM transcriptions t
+            JOIN videos v ON t.video_id = v.id
+            WHERE v.video_id = ? AND COALESCE(v.source_site, 'youtube') = ?
+            ORDER BY t.created_at DESC
+            LIMIT 1
+            """,
+            (video_id, site),
+        )
+    elif video_id:
+        # Legacy callers without site: prefer youtube, then any
         cursor.execute(
             """
             SELECT t.id, t.created_at
             FROM transcriptions t
             JOIN videos v ON t.video_id = v.id
             WHERE v.video_id = ?
-            ORDER BY t.created_at DESC
+            ORDER BY
+                CASE WHEN COALESCE(v.source_site, 'youtube') = 'youtube' THEN 0 ELSE 1 END,
+                t.created_at DESC
             LIMIT 1
             """,
             (video_id,),
         )
     elif url:
-        cursor.execute(
-            """
-            SELECT t.id, t.created_at
-            FROM transcriptions t
-            JOIN videos v ON t.video_id = v.id
-            WHERE v.url = ?
-            ORDER BY t.created_at DESC
-            LIMIT 1
-            """,
-            (url,),
-        )
+        if site:
+            cursor.execute(
+                """
+                SELECT t.id, t.created_at
+                FROM transcriptions t
+                JOIN videos v ON t.video_id = v.id
+                WHERE v.url = ? AND COALESCE(v.source_site, 'youtube') = ?
+                ORDER BY t.created_at DESC
+                LIMIT 1
+                """,
+                (url, site),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT t.id, t.created_at
+                FROM transcriptions t
+                JOIN videos v ON t.video_id = v.id
+                WHERE v.url = ?
+                ORDER BY t.created_at DESC
+                LIMIT 1
+                """,
+                (url,),
+            )
     else:
         conn.close()
         return None
@@ -961,7 +1112,8 @@ def get_job_row(job_id):
         SELECT id, status, input_type, input_value, expanded_count,
                progress_json, log_tail, error_message,
                result_transcription_id, result_video_id,
-               created_at, started_at, finished_at
+               created_at, started_at, finished_at, result_json,
+               worker_id, heartbeat_at
         FROM jobs WHERE id = ?
         """,
         (job_id,),
@@ -980,7 +1132,8 @@ def list_job_rows(status=None, limit=50):
             SELECT id, status, input_type, input_value, expanded_count,
                    progress_json, log_tail, error_message,
                    result_transcription_id, result_video_id,
-                   created_at, started_at, finished_at
+                   created_at, started_at, finished_at, result_json,
+                   worker_id, heartbeat_at
             FROM jobs WHERE status = ?
             ORDER BY created_at DESC LIMIT ?
             """,
@@ -992,7 +1145,8 @@ def list_job_rows(status=None, limit=50):
             SELECT id, status, input_type, input_value, expanded_count,
                    progress_json, log_tail, error_message,
                    result_transcription_id, result_video_id,
-                   created_at, started_at, finished_at
+                   created_at, started_at, finished_at, result_json,
+                   worker_id, heartbeat_at
             FROM jobs
             ORDER BY created_at DESC LIMIT ?
             """,
@@ -1014,6 +1168,9 @@ def update_job_fields(job_id, **fields):
         "error_message",
         "result_transcription_id",
         "result_video_id",
+        "result_json",
+        "worker_id",
+        "heartbeat_at",
         "started_at",
         "finished_at",
     }
@@ -1036,6 +1193,7 @@ def update_job_fields(job_id, **fields):
 
 
 def get_next_queued_job_id():
+    """Peek next queued id (non-claiming). Prefer claim_next_queued_job()."""
     conn = _connect()
     cursor = conn.cursor()
     cursor.execute(
@@ -1051,6 +1209,120 @@ def get_next_queued_job_id():
     return row[0] if row else None
 
 
+def claim_next_queued_job(worker_id=None):
+    """Atomically transition the oldest queued job to running.
+
+    Returns job_id or None. Uses BEGIN IMMEDIATE so concurrent workers
+    cannot claim the same row.
+    """
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id FROM jobs
+            WHERE status = 'queued'
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            return None
+        job_id = row[0]
+        owner = str(worker_id or "legacy-worker")
+        now = datetime.now()
+        cursor.execute(
+            """
+            UPDATE jobs
+            SET status = 'running',
+                started_at = ?,
+                worker_id = ?,
+                heartbeat_at = ?
+            WHERE id = ? AND status = 'queued'
+            """,
+            (now, owner, now, job_id),
+        )
+        if cursor.rowcount != 1:
+            conn.commit()
+            return None
+        conn.commit()
+        return job_id
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def touch_job_heartbeat(job_id, worker_id):
+    """Renew one running job lease only when owned by this worker."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE jobs
+        SET heartbeat_at = ?
+        WHERE id = ? AND status = 'running' AND worker_id = ?
+        """,
+        (datetime.now(), job_id, str(worker_id)),
+    )
+    updated = cursor.rowcount == 1
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def fail_orphan_running_jobs(error_message=None, stale_after_seconds=120):
+    """Mark only missing or expired running leases as failed.
+
+    Returns list of failed job ids.
+    """
+    msg = error_message or (
+        "Job interrupted: worker process restarted while status was running"
+    )
+    conn = _connect()
+    cursor = conn.cursor()
+    cutoff = datetime.now() - timedelta(seconds=max(0, int(stale_after_seconds)))
+    cursor.execute(
+        """
+        SELECT id FROM jobs
+        WHERE status = 'running'
+          AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+        """,
+        (cutoff,),
+    )
+    ids = [r[0] for r in cursor.fetchall()]
+    now = datetime.now()
+    for job_id in ids:
+        cursor.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed',
+                finished_at = ?,
+                error_message = ?,
+                log_tail = COALESCE(log_tail, '') || ?,
+                worker_id = NULL,
+                heartbeat_at = NULL
+            WHERE id = ? AND status = 'running'
+            """,
+            (
+                now,
+                msg,
+                f"\n[recovery] {msg}\n",
+                job_id,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return ids
+
+
 def count_jobs_by_status(status):
     conn = _connect()
     cursor = conn.cursor()
@@ -1058,3 +1330,285 @@ def count_jobs_by_status(status):
     n = cursor.fetchone()[0]
     conn.close()
     return n
+
+
+# --- RAG index queue (transactional) ---
+
+def enqueue_rag_job(transcription_id, op="index"):
+    """Insert a queued RAG job. Concurrent enqueues never overwrite others."""
+    conn = _connect()
+    cursor = conn.cursor()
+    now = datetime.now()
+    cursor.execute(
+        """
+        INSERT INTO rag_index_jobs
+            (transcription_id, op, status, attempts, created_at, updated_at)
+        VALUES (?, ?, 'queued', 0, ?, ?)
+        """,
+        (int(transcription_id), op or "index", now, now),
+    )
+    job_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return job_id
+
+
+def claim_next_rag_job(stale_running_seconds=900, max_attempts=3):
+    """Recover expired running jobs, then atomically claim one queued/error job.
+
+    Returns dict row or None.
+    """
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        now = datetime.now()
+        # Recover stale running → queued (retry without loss)
+        cursor.execute(
+            """
+            UPDATE rag_index_jobs
+            SET status = 'queued',
+                last_error = COALESCE(last_error, '') || ' [recovered stale running]',
+                claimed_at = NULL,
+                next_attempt_at = NULL,
+                updated_at = ?
+            WHERE status = 'running'
+              AND claimed_at IS NOT NULL
+              AND (
+                    CAST(strftime('%s', ?) AS INTEGER)
+                  - CAST(strftime('%s', claimed_at) AS INTEGER)
+              ) > ?
+            """,
+            (now, now, int(stale_running_seconds)),
+        )
+        # Also recover running with null claimed_at
+        cursor.execute(
+            """
+            UPDATE rag_index_jobs
+            SET status = 'queued',
+                last_error = COALESCE(last_error, '') || ' [recovered orphan running]',
+                claimed_at = NULL,
+                next_attempt_at = NULL,
+                updated_at = ?
+            WHERE status = 'running' AND claimed_at IS NULL
+            """,
+            (now,),
+        )
+        cursor.execute(
+            """
+            SELECT id, transcription_id, op, status, attempts, last_error, last_result,
+                   claimed_at, created_at, updated_at, next_attempt_at
+            FROM rag_index_jobs
+            WHERE status = 'queued'
+               OR (
+                    status = 'error'
+                    AND attempts < ?
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+               )
+            ORDER BY
+                CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
+                COALESCE(next_attempt_at, created_at) ASC,
+                created_at ASC
+            LIMIT 1
+            """
+            ,
+            (int(max_attempts), now),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            return None
+        job_id = row[0]
+        cursor.execute(
+            """
+            UPDATE rag_index_jobs
+            SET status = 'running',
+                attempts = attempts + 1,
+                claimed_at = ?,
+                updated_at = ?
+            WHERE id = ? AND status IN ('queued', 'error')
+            """,
+            (now, now, job_id),
+        )
+        if cursor.rowcount != 1:
+            conn.commit()
+            return None
+        cursor.execute(
+            """
+            SELECT id, transcription_id, op, status, attempts, last_error, last_result,
+                   claimed_at, created_at, updated_at, next_attempt_at
+            FROM rag_index_jobs WHERE id = ?
+            """,
+            (job_id,),
+        )
+        claimed = cursor.fetchone()
+        conn.commit()
+        if not claimed:
+            return None
+        return {
+            "id": claimed[0],
+            "transcription_id": claimed[1],
+            "op": claimed[2],
+            "status": claimed[3],
+            "attempts": claimed[4],
+            "last_error": claimed[5],
+            "last_result": claimed[6],
+            "claimed_at": claimed[7],
+            "created_at": claimed[8],
+            "updated_at": claimed[9],
+            "next_attempt_at": claimed[10],
+        }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def finish_rag_job(
+    job_id,
+    *,
+    status,
+    last_error=None,
+    last_result=None,
+    retry_delay_seconds=0,
+):
+    conn = _connect()
+    cursor = conn.cursor()
+    now = datetime.now()
+    next_attempt_at = None
+    if status == "error" and retry_delay_seconds > 0:
+        next_attempt_at = now + timedelta(seconds=int(retry_delay_seconds))
+    cursor.execute(
+        """
+        UPDATE rag_index_jobs
+        SET status = ?,
+            last_error = ?,
+            last_result = ?,
+            updated_at = ?,
+            claimed_at = CASE WHEN ? = 'running' THEN claimed_at ELSE NULL END,
+            next_attempt_at = ?
+        WHERE id = ?
+        """,
+        (
+            status,
+            last_error,
+            last_result,
+            now,
+            status,
+            next_attempt_at,
+            int(job_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def count_rag_jobs_by_status(status):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM rag_index_jobs WHERE status = ?",
+        (status,),
+    )
+    n = cursor.fetchone()[0]
+    conn.close()
+    return n
+
+
+def list_rag_job_rows(status=None, limit=100):
+    conn = _connect()
+    cursor = conn.cursor()
+    if status:
+        cursor.execute(
+            """
+            SELECT id, transcription_id, op, status, attempts, last_error, last_result,
+                   claimed_at, created_at, updated_at, next_attempt_at
+            FROM rag_index_jobs WHERE status = ?
+            ORDER BY created_at ASC LIMIT ?
+            """,
+            (status, limit),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT id, transcription_id, op, status, attempts, last_error, last_result,
+                   claimed_at, created_at, updated_at, next_attempt_at
+            FROM rag_index_jobs
+            ORDER BY created_at ASC LIMIT ?
+            """,
+            (limit,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def import_legacy_rag_jsonl_once(queue_file, setting_key="rag_queue_jsonl_imported"):
+    """Idempotently import pending/error jobs from legacy JSONL into SQLite.
+
+    Preserves corpus/manifest/RAG DB (only reads JSONL queue). Returns import count.
+    """
+    flag = get_setting(setting_key)
+    if flag == "1":
+        return 0
+    path = Path(queue_file) if queue_file else None
+    imported = 0
+    if path and path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                job = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            status = str(job.get("status") or "pending").lower()
+            if status not in {"pending", "error", "queued"}:
+                continue
+            tid = job.get("transcription_id")
+            if tid is None:
+                continue
+            op = job.get("op") or "index"
+            # Map pending → queued
+            target_status = "error" if status == "error" else "queued"
+            conn = _connect()
+            cursor = conn.cursor()
+            # Idempotent: skip if same tid+op already queued/error/running
+            cursor.execute(
+                """
+                SELECT id FROM rag_index_jobs
+                WHERE transcription_id = ? AND op = ?
+                  AND status IN ('queued', 'error', 'running')
+                LIMIT 1
+                """,
+                (int(tid), op),
+            )
+            if cursor.fetchone():
+                conn.close()
+                continue
+            now = datetime.now()
+            cursor.execute(
+                """
+                INSERT INTO rag_index_jobs
+                    (transcription_id, op, status, attempts, last_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(tid),
+                    op,
+                    target_status,
+                    int(job.get("attempts") or 0),
+                    job.get("last_error"),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            imported += 1
+    set_setting(setting_key, "1")
+    return imported

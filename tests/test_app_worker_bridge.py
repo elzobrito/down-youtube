@@ -78,3 +78,91 @@ def test_cancel_running_via_flag():
     assert cancel_job(jid) is True
     job = wait_job(jid, timeout=5)
     assert job.status in ("cancelled", "done")  # race may finish done rarely
+
+
+def test_job_persists_ordered_results_from_worker():
+    """Worker-provided results are stored; no URL re-lookup required."""
+
+    def process(job):
+        return {
+            "status": "done",
+            "expanded_count": 2,
+            "results": [
+                {"transcription_id": 11, "video_id": 101},
+                {"transcription_id": 12, "video_id": 102},
+            ],
+            # singular fields only when exactly one result — leave empty for multi
+        }
+
+    set_process_function(process)
+    jid = create_job(url="https://youtu.be/abc", auto_start=True)
+    job = wait_job(jid, timeout=5)
+    assert job.status == "done"
+    assert job.results is not None
+    assert [r["transcription_id"] for r in job.results] == [11, 12]
+    assert job.result_transcription_id is None  # multi → singular empty
+
+
+def test_job_singular_result_when_one():
+    def process(job):
+        return {
+            "status": "done",
+            "expanded_count": 1,
+            "results": [{"transcription_id": 42, "video_id": 7}],
+            "result_transcription_id": 42,
+            "result_video_id": 7,
+        }
+
+    set_process_function(process)
+    jid = create_job(path="/tmp/local.mp3", auto_start=True)
+    job = wait_job(jid, timeout=5)
+    assert job.status == "done"
+    assert job.result_transcription_id == 42
+    assert job.result_video_id == 7
+    assert job.results == [{"transcription_id": 42, "video_id": 7}]
+
+
+def test_restart_recovery_then_claim(monkeypatch):
+    from app.jobs import reconcile_jobs_on_startup, start_worker_loop, wait_job
+    from database import insert_job, update_job_fields
+
+    insert_job("stuck", "url", "https://example.com/stuck", status="queued")
+    update_job_fields("stuck", status="running")
+    jid = create_job(url="https://example.com/ok2", auto_start=False)
+
+    set_process_function(
+        lambda job: {
+            "status": "done",
+            "results": [{"transcription_id": 1, "video_id": 1}],
+            "result_transcription_id": 1,
+            "result_video_id": 1,
+        }
+    )
+    reconcile_jobs_on_startup()
+    assert get_job("stuck").status == "failed"
+    start_worker_loop()
+    job = wait_job(jid, timeout=5)
+    assert job.status == "done"
+
+
+def test_running_job_heartbeat_is_renewed(monkeypatch):
+    import time
+
+    import app.jobs as jobs_module
+    from database import get_job_row
+
+    monkeypatch.setattr(jobs_module, "JOB_HEARTBEAT_SECONDS", 0.02)
+    observed = {}
+
+    def process(job):
+        observed["before"] = get_job_row(job.id)[15]
+        time.sleep(0.08)
+        observed["after"] = get_job_row(job.id)[15]
+        return {"status": "done", "expanded_count": 1}
+
+    set_process_function(process)
+    jid = create_job(url="https://example.com/heartbeat", auto_start=True)
+    job = wait_job(jid, timeout=5)
+    assert job.status == "done"
+    assert observed["before"] is not None
+    assert observed["after"] > observed["before"]

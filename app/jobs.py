@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -12,16 +13,22 @@ from typing import Any, Callable, Dict, List, Optional
 
 from app.models import Job, job_from_row
 from database import (
+    claim_next_queued_job,
     count_jobs_by_status,
+    fail_orphan_running_jobs,
     get_job_row,
     get_next_queued_job_id,
     init_database,
     insert_job,
     list_job_rows,
+    touch_job_heartbeat,
     update_job_fields,
 )
 
 LOG_TAIL_MAX_CHARS = 12000
+JOB_LEASE_SECONDS = 120
+JOB_HEARTBEAT_SECONDS = 10.0
+_WORKER_TOKEN = uuid.uuid4().hex
 
 _lock = threading.RLock()
 _worker_thread: Optional[threading.Thread] = None
@@ -30,6 +37,10 @@ _active_worker = None  # TranscriberWorker instance while running
 _process_fn: Optional[Callable[[Job], Dict[str, Any]]] = None
 # Per-job hooks for GUI (confirm dialogs, queue row updates)
 _job_hooks: Dict[str, Dict[str, Any]] = {}
+
+
+def _current_worker_id() -> str:
+    return f"{os.getpid()}:{_WORKER_TOKEN}"
 
 
 def _ensure_db():
@@ -226,10 +237,30 @@ def set_process_function(fn: Optional[Callable[[Job], Dict[str, Any]]]) -> None:
     _process_fn = fn
 
 
+def reconcile_jobs_on_startup(stale_after_seconds: int = JOB_LEASE_SECONDS) -> List[str]:
+    """Fail orphan running jobs left by a previous process crash/restart.
+
+    Must run before claiming new work so a stale running row cannot block
+    the queue forever.
+    """
+    _ensure_db()
+    failed = fail_orphan_running_jobs(stale_after_seconds=stale_after_seconds)
+    for jid in failed:
+        try:
+            append_log(jid, "[recovery] marked failed after worker restart")
+        except Exception:
+            pass
+    return failed
+
+
 def start_worker_loop() -> None:
     """Ensure background loop is running (idempotent)."""
     global _worker_thread
+    _ensure_db()
     with _lock:
+        # Recover orphans every time we (re)start the loop process path
+        if _worker_thread is None or not _worker_thread.is_alive():
+            reconcile_jobs_on_startup()
         if _worker_thread is not None and _worker_thread.is_alive():
             return
         _stop_event.clear()
@@ -270,12 +301,16 @@ def wait_job(job_id: str, timeout: Optional[float] = None, poll: float = 0.25) -
 
 def _worker_loop() -> None:
     while not _stop_event.is_set():
+        # In-process: only one active worker thread, but claim is still atomic
+        # for multi-process safety and restart recovery.
         if count_jobs_by_status("running") > 0:
-            time.sleep(0.2)
-            continue
-        job_id = get_next_queued_job_id()
+            # Preserve live external work; recover it only after lease expiry.
+            reconcile_jobs_on_startup()
+            if count_jobs_by_status("running") > 0:
+                time.sleep(0.2)
+                continue
+        job_id = claim_next_queued_job(worker_id=_current_worker_id())
         if not job_id:
-            # Idle briefly; exit if stop requested
             if _stop_event.wait(0.3):
                 break
             continue
@@ -285,15 +320,36 @@ def _worker_loop() -> None:
 def _run_one_job(job_id: str) -> None:
     global _active_worker
     job = get_job(job_id)
-    if not job or job.status != "queued":
+    # claim_next_queued_job already set status=running
+    if not job or job.status not in {"running", "queued"}:
         return
+    if job.status == "queued":
+        # Legacy path if called without claim
+        now = datetime.now()
+        update_job_fields(
+            job_id,
+            status="running",
+            started_at=now,
+            worker_id=_current_worker_id(),
+            heartbeat_at=now,
+        )
+        job = get_job(job_id)
 
-    update_job_fields(
-        job_id,
-        status="running",
-        started_at=datetime.now(),
-    )
     append_log(job_id, f"Job started ({job.input_type})")
+    heartbeat_stop = threading.Event()
+
+    def heartbeat_loop() -> None:
+        while not heartbeat_stop.wait(JOB_HEARTBEAT_SECONDS):
+            if not touch_job_heartbeat(job_id, _current_worker_id()):
+                break
+
+    touch_job_heartbeat(job_id, _current_worker_id())
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        name=f"down-youtube-job-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
 
     try:
         process = _process_fn or _default_process_job
@@ -305,6 +361,8 @@ def _run_one_job(job_id: str) -> None:
                 job_id,
                 finished_at=datetime.now(),
                 error_message=current.error_message or "Cancelled",
+                worker_id=None,
+                heartbeat_at=None,
             )
             append_log(job_id, "Job cancelled")
             return
@@ -314,9 +372,14 @@ def _run_one_job(job_id: str) -> None:
             "status": status,
             "finished_at": datetime.now(),
             "expanded_count": result.get("expanded_count", 0),
+            "worker_id": None,
+            "heartbeat_at": None,
         }
         if result.get("error_message"):
             fields["error_message"] = result["error_message"]
+        results = result.get("results")
+        if results is not None:
+            fields["result_json"] = json.dumps(results, default=str)
         if result.get("result_transcription_id") is not None:
             fields["result_transcription_id"] = result["result_transcription_id"]
         if result.get("result_video_id") is not None:
@@ -329,9 +392,13 @@ def _run_one_job(job_id: str) -> None:
             status="failed",
             finished_at=datetime.now(),
             error_message=str(exc),
+            worker_id=None,
+            heartbeat_at=None,
         )
         append_log(job_id, f"Job error: {exc}")
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1.0)
         with _lock:
             _active_worker = None
 
@@ -341,7 +408,6 @@ def _default_process_job(job: Job) -> Dict[str, Any]:
     global _active_worker
     from core.worker import TranscriberWorker
     from core.url_resolver import expand_input_urls
-    from database import get_latest_transcription_for_source
 
     with _lock:
         hooks = dict(_job_hooks.get(job.id) or {})
@@ -412,16 +478,24 @@ def _default_process_job(job: Job) -> Dict[str, Any]:
             "status": "cancelled",
             "expanded_count": expanded_count,
             "error_message": "Cancelled by user",
+            "results": list(getattr(worker, "produced_results", []) or []),
         }
 
     failed = summary.get("failed", 0) if isinstance(summary, dict) else 0
     cancelled = summary.get("cancelled") if isinstance(summary, dict) else False
+    results = []
+    if isinstance(summary, dict):
+        results = list(summary.get("results") or getattr(worker, "produced_results", []) or [])
+    else:
+        results = list(getattr(worker, "produced_results", []) or [])
+
     if cancelled:
         clear_job_hooks(job.id)
         return {
             "status": "cancelled",
             "expanded_count": expanded_count,
             "error_message": "Cancelled",
+            "results": results,
         }
     if failed and (
         not isinstance(summary, dict)
@@ -433,22 +507,21 @@ def _default_process_job(job: Job) -> Dict[str, Any]:
             "status": "failed",
             "expanded_count": expanded_count,
             "error_message": err,
+            "results": results,
         }
 
+    # Persist ordered results produced by the worker — never re-lookup by original URL
     result_tid = None
     result_vid = None
-    try:
-        if job.input_type == "url":
-            row = get_latest_transcription_for_source(url=job.input_value)
-            if row and isinstance(row, (list, tuple)) and len(row) >= 1:
-                result_tid = row[0] if isinstance(row[0], int) else None
-    except Exception:
-        pass
+    if len(results) == 1:
+        result_tid = results[0].get("transcription_id")
+        result_vid = results[0].get("video_id")
 
     clear_job_hooks(job.id)
     return {
         "status": "done",
         "expanded_count": expanded_count,
+        "results": results,
         "result_transcription_id": result_tid,
         "result_video_id": result_vid,
     }

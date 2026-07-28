@@ -1,0 +1,3 @@
+SUPERSEDED by YT-JOB-RECOVERY-HOTFIX-001
+This automatic hotfix had incorrect scope_patch (src/hotfix/).
+Real fix: app/jobs.py + database.py (orphan running recovery + atomic claim).
