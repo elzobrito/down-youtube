@@ -269,7 +269,7 @@ class YouTubeTranscriberApp:
                     self.download_tab.log_message(line, "info")
 
         if job.progress:
-            self._apply_progress_dict(job.progress)
+            self._apply_progress_state(job.progress)
 
         if job.status in ("done", "failed", "cancelled"):
             if job.status == "failed" and job.error_message:
@@ -278,15 +278,15 @@ class YouTubeTranscriberApp:
                 self.download_tab.log_message("⚠️ Job cancelado", "warning")
             elif job.status == "done":
                 self.download_tab.log_message("✅ Job concluído", "success")
-            self._finish_processing()
+            self._finish_processing(success=(job.status == "done"))
             return
 
-        self._poll_after_id = self.root.after(250, self._poll_job)
+        self._poll_after_id = self.root.after(200, self._poll_job)
 
-    def _finish_processing(self):
+    def _finish_processing(self, success=True):
         self.active_job_id = None
         self._poll_after_id = None
-        self._on_complete()
+        self._on_complete(success=success)
 
     def _on_escape(self, event):
         """Cancela processamento ao pressionar Escape (se não estiver em campo de texto)"""
@@ -302,35 +302,69 @@ class YouTubeTranscriberApp:
     def _log(self, message):
         self.root.after(0, lambda: self.download_tab.log_message(str(message), "info"))
 
+    def _apply_progress_state(self, progress: dict):
+        """Apply merged job progress (by_stage) or a single flat event."""
+        if not isinstance(progress, dict):
+            return
+        by_stage = progress.get("by_stage")
+        if isinstance(by_stage, dict) and by_stage:
+            # Stable order so later stages paint after earlier ones
+            order = (
+                "pipeline_mode",
+                "download",
+                "conversion",
+                "transcription",
+                "stats",
+                "nerd_download",
+                "nerd_conversion",
+                "nerd_transcription",
+                "nerd_filesystem",
+                "status",
+            )
+            seen = set()
+            for key in order:
+                if key in by_stage:
+                    self._apply_progress_dict(by_stage[key])
+                    seen.add(key)
+            for key, payload in by_stage.items():
+                if key not in seen and isinstance(payload, dict):
+                    self._apply_progress_dict(payload)
+            return
+        # Flat single-event format (legacy)
+        self._apply_progress_dict(progress)
+
     def _apply_progress_dict(self, message: dict):
         if not isinstance(message, dict):
             return
         stage = message.get("stage")
 
         if stage == "pipeline_mode":
-            self.download_tab.set_pipeline_mode(message.get("mode", "idle"))
+            mode = message.get("mode", "idle")
+            # Avoid spam: only set when mode changes
+            if getattr(self.download_tab, "current_mode", None) != mode:
+                self.download_tab.set_pipeline_mode(mode)
         elif stage == "download":
             self.download_tab.update_download_progress(
-                percent=int(message.get("percent", 0)),
+                percent=int(message.get("percent", 0) or 0),
                 speed=message.get("speed", "-"),
                 eta=message.get("eta", "-"),
-                downloaded=message.get("downloaded_mb", 0),
-                total=message.get("total_mb", 0),
+                downloaded=message.get("downloaded_mb", 0) or 0,
+                total=message.get("total_mb", 0) or 0,
             )
         elif stage == "conversion":
             self.download_tab.update_conversion_progress(
-                percent=int(message.get("percent", 0)),
+                percent=int(message.get("percent", 0) or 0),
                 format_info=message.get("format", "PCM 16kHz Mono"),
                 speed=message.get("speed", "1.0"),
-                size=message.get("size_mb", 0),
+                size=message.get("size_mb", 0) or 0,
             )
         elif stage == "transcription":
             self.download_tab.update_transcription_progress(
-                percent=int(message.get("percent", 0)),
+                percent=int(message.get("percent", 0) or 0),
                 elapsed=message.get("elapsed", "00:00"),
                 model=message.get("model", ""),
-                threads=message.get("threads", 0),
-                words=message.get("words", 0),
+                threads=message.get("threads", 0) or 0,
+                words=message.get("words", 0) or 0,
             )
         elif stage == "stats":
             self.download_tab.update_stats(**message)
@@ -343,7 +377,8 @@ class YouTubeTranscriberApp:
         elif stage == "nerd_filesystem":
             self.download_tab.update_nerd_filesystem(**message)
         elif stage == "status":
-            self.download_tab.log_message(message.get("message", ""), "info")
+            # status is also mirrored in log via append_log; skip duplicate UI spam
+            pass
 
     def _update_progress(self, message):
         """Legacy callback shape — kept for compatibility if needed."""
@@ -370,9 +405,9 @@ class YouTubeTranscriberApp:
         done.wait(timeout=600)
         return result["value"]
 
-    def _on_complete(self):
+    def _on_complete(self, success=True):
         def apply_complete():
-            self.download_tab.finish_progress()
+            self.download_tab.finish_progress(success=success)
             self.download_tab.set_processing(False)
             self.queue_tab.set_processing(False)
             self.history_tab.refresh()

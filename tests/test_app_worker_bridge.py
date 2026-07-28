@@ -50,7 +50,9 @@ def test_progress_and_log_updated():
     job = wait_job(jid, timeout=5)
     assert job.status == "done"
     assert job.expanded_count == 2
-    assert job.progress and job.progress.get("percent") == 50
+    assert job.progress
+    by = job.progress.get("by_stage") or {}
+    assert by.get("download", {}).get("percent") == 50
     assert "halfway" in (job.log_tail or "")
 
 

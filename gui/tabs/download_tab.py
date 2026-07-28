@@ -367,14 +367,31 @@ class DownloadTab(ttk.Frame):
         """Atualiza painel NERD - seção de filesystem"""
         self.nerd_panel.update_filesystem_stats(**kwargs)
 
-    def finish_progress(self):
-        """Finaliza o progresso"""
-        self.log.log("✅ Processo concluído com sucesso!", "success")
-        
+    def finish_progress(self, success=True):
+        """Finaliza o progresso — força barras em 100% para não ficarem 'travadas'."""
+        if success:
+            self.log.log("✅ Processo concluído com sucesso!", "success")
+            # Complete all stage bars (job may have finished without a final 100% event)
+            self.stage_panels.update_download(
+                percent=100, speed_current="-", downloaded=0, total=0, eta="0s"
+            )
+            self.stage_panels.download_panel["info_label"].config(text="Concluído")
+            self.stage_panels.update_conversion(
+                percent=100, format_info="OK", speed="-", size=0
+            )
+            self.stage_panels.conversion_panel["info_label"].config(text="Concluído")
+            self.stage_panels.update_transcription(
+                percent=100, model="", threads=0, elapsed="-", words=0
+            )
+            self.stage_panels.transcription_panel["info_label"].config(text="Concluído")
+        else:
+            # Leave bars as-is on failure/cancel but clear pipeline badge below
+            pass
+
         # Calcular pipeline gain se houver tempo de início
         if self.start_time and self.current_mode:
             elapsed = time.time() - self.start_time
-            
+
             # Estimar tempo tradicional baseado no modo usado
             if self.current_mode == "streaming":
                 # Streaming: download e conversão paralelos
@@ -382,11 +399,14 @@ class DownloadTab(ttk.Frame):
                 # Estimativa conservadora: tradicional seria 30% mais lento
                 estimated_traditional = elapsed * 1.30
                 self.stats_panel.calculate_pipeline_gain(elapsed, estimated_traditional)
-                self.log.log(f"⚡ Pipeline streaming economizou ~{int((estimated_traditional - elapsed))}s", "success")
+                self.log.log(
+                    f"⚡ Pipeline streaming economizou ~{int((estimated_traditional - elapsed))}s",
+                    "success",
+                )
             elif self.current_mode == "traditional":
                 # Modo tradicional - sem ganho
                 self.stats_panel.update_gain(0)
-        
+
         self.pipeline_badge.set_mode("idle")
 
     def reset_progress(self):

@@ -189,7 +189,35 @@ def append_log(job_id: str, line: str) -> None:
 
 
 def update_progress(job_id: str, progress: Dict[str, Any]) -> None:
-    update_job_fields(job_id, progress_json=json.dumps(progress, default=str))
+    """
+    Merge progress by stage so polling UI does not lose earlier stage snapshots.
+
+    Stored shape:
+      {
+        "by_stage": { "download": {...}, "transcription": {...}, ... },
+        "last": { ... last raw event ... }
+      }
+    """
+    if not isinstance(progress, dict):
+        return
+    job = get_job(job_id)
+    state: Dict[str, Any] = {"by_stage": {}, "last": progress}
+    if job and isinstance(job.progress, dict):
+        prev = job.progress
+        if "by_stage" in prev and isinstance(prev.get("by_stage"), dict):
+            state["by_stage"] = dict(prev["by_stage"])
+        elif prev.get("stage"):
+            # Migrate flat last-event format
+            state["by_stage"] = {str(prev["stage"]): prev}
+
+    stage = progress.get("stage")
+    if stage:
+        # Keep latest payload per stage key
+        state["by_stage"][str(stage)] = progress
+    else:
+        state["by_stage"]["_raw"] = progress
+
+    update_job_fields(job_id, progress_json=json.dumps(state, default=str))
 
 
 def set_process_function(fn: Optional[Callable[[Job], Dict[str, Any]]]) -> None:

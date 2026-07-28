@@ -67,3 +67,18 @@ def test_create_requires_url_or_path():
         create_job()
     with pytest.raises(ValueError):
         create_job(url="http://a", path="/tmp/b")
+
+
+def test_update_progress_merges_by_stage():
+    from app.jobs import create_job, get_job, update_progress
+
+    set_process_function(lambda job: time.sleep(0.2) or {"status": "done"})
+    jid = create_job(url="https://example.com/p", auto_start=False)
+    update_progress(jid, {"stage": "download", "percent": 40, "speed": "1M"})
+    update_progress(jid, {"stage": "transcription", "percent": 10})
+    update_progress(jid, {"stage": "download", "percent": 100})
+    job = get_job(jid)
+    assert job.progress is not None
+    by = job.progress.get("by_stage") or {}
+    assert by["download"]["percent"] == 100
+    assert by["transcription"]["percent"] == 10
