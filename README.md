@@ -47,8 +47,8 @@ All three interfaces share one application layer and one SQLite database:
 │  GUI (Tk)   │  │  CLI        │  │  API HTTP        │
 │  desktop    │  │  scripts    │  │  FastAPI         │
 └──────┬──────┘  └──────┬──────┘  └────────┬─────────┘
-       │                │                   │
-       └────────────────┼───────────────────┘
+       │                │                  │
+       └────────────────┼──────────────────┘
                         ▼
               ┌─────────────────────┐
               │  app/               │  jobs queue, library facade
