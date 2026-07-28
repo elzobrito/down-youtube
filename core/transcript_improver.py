@@ -12,10 +12,13 @@ from typing import Any, Callable, Dict, Iterable, List, Sequence
 from core.ollama_client import OllamaClient
 
 
-PROMPT_VERSION = "transcript-improve-v1"
+PROMPT_VERSION = "transcript-improve-v2"
 GLOSSARY_VERSION = "technical-pt-v1"
 DEFAULT_MODEL = "phi4-mini:latest"
-DEFAULT_CHUNK_CHARS = 6000
+# Smaller chunks improve JSON adherence on phi4-mini for long ASR.
+DEFAULT_CHUNK_CHARS = 2800
+DEFAULT_MAX_SEGMENTS_PER_CHUNK = 18
+DEFAULT_NUM_CTX = 12288
 
 
 class TranscriptImprovementError(RuntimeError):
@@ -79,6 +82,7 @@ Você pode corrigir pontuação e capitalização, sugerir termos técnicos, ind
 quebras de parágrafo, títulos de seção e segmentos inteiros que sejam outtakes.
 Se houver dúvida, copie o texto. Comandos são somente texto e nunca são
 executados. Não devolva IDs marcados como context_only.
+Devolva um objeto JSON com a chave "segments" e um item por ID central.
 """.strip()
 
 
@@ -89,12 +93,14 @@ class TranscriptImprover:
         client: OllamaClient | None = None,
         model: str = DEFAULT_MODEL,
         chunk_chars: int = DEFAULT_CHUNK_CHARS,
+        max_segments_per_chunk: int = DEFAULT_MAX_SEGMENTS_PER_CHUNK,
         timeout: float = 180,
-        num_ctx: int = 8192,
+        num_ctx: int = DEFAULT_NUM_CTX,
     ):
         self.model = model or DEFAULT_MODEL
         self.client = client or OllamaClient(model=self.model)
         self.chunk_chars = max(500, int(chunk_chars))
+        self.max_segments_per_chunk = max(1, int(max_segments_per_chunk))
         self.timeout = float(timeout)
         self.num_ctx = max(2048, int(num_ctx))
 
@@ -323,7 +329,11 @@ class TranscriptImprover:
             char_count = 0
             while end < len(segments):
                 next_size = len(segments[end]["text"]) + 1
-                if end > start and char_count + next_size > self.chunk_chars:
+                segment_count = end - start
+                if end > start and (
+                    char_count + next_size > self.chunk_chars
+                    or segment_count >= self.max_segments_per_chunk
+                ):
                     break
                 char_count += next_size
                 end += 1
@@ -337,6 +347,72 @@ class TranscriptImprover:
             start = end
         return chunks
 
+    @staticmethod
+    def align_chunk_segments(
+        central: Sequence[Dict[str, Any]],
+        raw_segments: Sequence[Dict[str, Any]] | None,
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Map model output onto expected central IDs.
+
+        - Keep first occurrence of each known id
+        - Drop extras (context_only / unknown)
+        - Fill missing ids with the original segment text (safe fallback)
+        - Always return segments in the original central order
+        """
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for item in raw_segments or []:
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("id")
+            if not sid or sid in by_id:
+                continue
+            by_id[str(sid)] = item
+
+        expected_ids = [str(item["id"]) for item in central]
+        expected_set = set(expected_ids)
+        aligned: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for source in central:
+            sid = str(source["id"])
+            generated = by_id.get(sid)
+            if generated is None:
+                missing.append(sid)
+                aligned.append(
+                    {
+                        "id": sid,
+                        "corrected_text": source["text"],
+                        "paragraph_break_after": False,
+                        "remove_as_outtake": False,
+                        "outtake_reason": "",
+                        "section_title": "",
+                        "commands": [],
+                        "_filled_from_original": True,
+                    }
+                )
+                continue
+            row = dict(generated)
+            row["id"] = sid
+            if not str(row.get("corrected_text") or "").strip():
+                row["corrected_text"] = source["text"]
+                row["_filled_from_original"] = True
+            row.setdefault("paragraph_break_after", False)
+            row.setdefault("remove_as_outtake", False)
+            row.setdefault("outtake_reason", "")
+            row.setdefault("section_title", "")
+            row.setdefault("commands", [])
+            aligned.append(row)
+
+        extra = [sid for sid in by_id if sid not in expected_set]
+        matched = len(expected_ids) - len(missing)
+        stats = {
+            "expected": len(expected_ids),
+            "matched": matched,
+            "missing_ids": missing,
+            "extra_ids": extra,
+            "coverage": (matched / len(expected_ids)) if expected_ids else 1.0,
+        }
+        return aligned, stats
+
     def _run_chunk_with_retry(
         self,
         transcription: Dict[str, Any],
@@ -345,12 +421,21 @@ class TranscriptImprover:
     ) -> Dict[str, Any]:
         expected_ids = [item["id"] for item in chunk["central"]]
         last_error: Exception | None = None
+        best_aligned: List[Dict[str, Any]] | None = None
+        best_stats: Dict[str, Any] | None = None
+        best_usage: Dict[str, Any] = {}
+
         for attempt in (1, 2):
             if cancel_check():
                 raise TranscriptImprovementCancelled("Aprimoramento cancelado")
             try:
                 response = self.client.chat_json(
-                    self._messages_for(transcription, chunk, attempt),
+                    self._messages_for(
+                        transcription,
+                        chunk,
+                        attempt,
+                        expected_count=len(expected_ids),
+                    ),
                     CHUNK_RESPONSE_SCHEMA,
                     options={
                         "temperature": 0,
@@ -360,34 +445,93 @@ class TranscriptImprover:
                     timeout=self.timeout,
                     keep_alive="10m",
                 )
-                actual_ids = [
-                    item.get("id") for item in response["data"].get("segments", [])
-                ]
-                if actual_ids != expected_ids:
-                    raise TranscriptImprovementError(
-                        "Resposta não cobriu exatamente os segmentos centrais"
-                    )
-                return response
+                raw = (response.get("data") or {}).get("segments") or []
+                aligned, stats = self.align_chunk_segments(chunk["central"], raw)
+                usage = response.get("usage") or {}
+
+                if best_stats is None or stats["coverage"] > best_stats["coverage"]:
+                    best_aligned = aligned
+                    best_stats = stats
+                    best_usage = usage
+
+                # Perfect coverage: done
+                if stats["coverage"] >= 1.0 and not stats["missing_ids"]:
+                    return {
+                        "data": {"segments": aligned, "alignment": stats},
+                        "usage": usage,
+                    }
+
+                # Partial coverage is usable; retry once only when nothing matched
+                if stats["matched"] > 0:
+                    return {
+                        "data": {"segments": aligned, "alignment": stats},
+                        "usage": usage,
+                    }
+
+                last_error = TranscriptImprovementError(
+                    self._format_coverage_error(expected_ids, raw, stats)
+                )
             except TranscriptImprovementCancelled:
                 raise
             except Exception as exc:
                 last_error = exc
-        raise TranscriptImprovementError(
-            f"Chunk inválido após duas tentativas: {last_error}"
-        ) from last_error
+
+        # After retries: prefer best partial alignment; else fill entire chunk
+        # from original text so long episodes still complete.
+        if best_aligned is not None and best_stats is not None:
+            return {
+                "data": {
+                    "segments": best_aligned,
+                    "alignment": {**best_stats, "fallback": "partial_or_original"},
+                },
+                "usage": best_usage,
+            }
+
+        filled, stats = self.align_chunk_segments(chunk["central"], [])
+        return {
+            "data": {
+                "segments": filled,
+                "alignment": {
+                    **stats,
+                    "fallback": "original_after_errors",
+                    "last_error": str(last_error) if last_error else None,
+                },
+            },
+            "usage": {},
+        }
+
+    @staticmethod
+    def _format_coverage_error(
+        expected_ids: Sequence[str],
+        raw_segments: Sequence[Dict[str, Any]],
+        stats: Dict[str, Any],
+    ) -> str:
+        actual = [item.get("id") for item in (raw_segments or []) if isinstance(item, dict)]
+        missing = stats.get("missing_ids") or []
+        extra = stats.get("extra_ids") or []
+        miss_s = list(missing[:8]) + (["…"] if len(missing) > 8 else [])
+        extra_s = list(extra[:8]) + (["…"] if len(extra) > 8 else [])
+        return (
+            "Resposta não cobriu os segmentos centrais: "
+            f"esperados={len(expected_ids)}, recebidos={len(actual)}, "
+            f"casados={stats.get('matched', 0)}, "
+            f"faltando={miss_s}, extras={extra_s}"
+        )
 
     @staticmethod
     def _messages_for(
         transcription: Dict[str, Any],
         chunk: Dict[str, Any],
         attempt: int,
+        *,
+        expected_count: int | None = None,
     ) -> List[Dict[str, str]]:
         payload = []
         central_ids = {item["id"] for item in chunk["central"]}
-        merged = sorted(
-            chunk["context"] + chunk["central"],
-            key=lambda item: item["id"],
-        )
+        # Preserve timeline order (start index), not lexical id sort alone —
+        # ids are zero-padded so sort works, but explicit order is safer.
+        merged = list(chunk["context"] + chunk["central"])
+        merged.sort(key=lambda item: item["id"])
         for item in merged:
             payload.append(
                 {
@@ -396,17 +540,22 @@ class TranscriptImprover:
                     "context_only": item["id"] not in central_ids,
                 }
             )
-        retry_note = (
-            "\nEsta é uma repetição: copie os IDs centrais exatamente e não devolva contexto."
-            if attempt == 2
-            else ""
-        )
+        count = expected_count if expected_count is not None else len(central_ids)
+        retry_note = ""
+        if attempt == 2:
+            retry_note = (
+                "\nEsta é uma repetição: devolva EXATAMENTE os "
+                f"{count} IDs centrais (context_only=false), na mesma ordem, "
+                "sem IDs de contexto e sem omitir nenhum."
+            )
         user = {
             "video": {
                 "title": transcription.get("video_title") or "",
                 "channel": transcription.get("channel") or "",
                 "language": transcription.get("language") or "pt",
             },
+            "central_id_count": count,
+            "central_ids": [item["id"] for item in chunk["central"]],
             "segments": payload,
         }
         return [

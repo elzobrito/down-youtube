@@ -147,18 +147,95 @@ def test_outtake_is_removed_from_draft_but_can_be_restored():
     assert "vou gravar de novo" in restored["improved_text"]
 
 
-def test_missing_segment_ids_retries_once_then_fails():
+def test_missing_segment_ids_retries_then_fills_originals():
+    """Empty model output: retry once for quality, then keep originals (no abort)."""
+
     class BrokenClient(FakeClient):
         def chat_json(self, messages, schema, **kwargs):
             self.calls.append({})
             return {"data": {"segments": []}, "usage": {}}
 
     client = BrokenClient()
-    with pytest.raises(TranscriptImprovementError, match="duas tentativas"):
-        TranscriptImprover(client=client, chunk_chars=10000).improve(
-            sample_transcription()
-        )
+    result = TranscriptImprover(client=client, chunk_chars=10000).improve(
+        sample_transcription()
+    )
     assert len(client.calls) == 2
+    # Draft still produced; source words remain (glossary may normalize terms)
+    assert "instala" in result["improved_text"].lower() or "cowsay" in result["improved_text"]
+    ids = [item["id"] for item in result["proposals"]["segments"]]
+    assert ids == ["seg-000001", "seg-000002", "seg-000003"]
+
+
+def test_partial_ids_are_aligned_without_abort():
+    class PartialClient(FakeClient):
+        def chat_json(self, messages, schema, **kwargs):
+            payload = json.loads(messages[-1]["content"])
+            central = [item for item in payload["segments"] if not item["context_only"]]
+            self.calls.append({"payload": payload})
+            # Return only the first central id + a bogus extra
+            first = central[0]
+            return {
+                "data": {
+                    "segments": [
+                        {
+                            "id": first["id"],
+                            "corrected_text": first["text"],
+                            "paragraph_break_after": False,
+                            "remove_as_outtake": False,
+                            "outtake_reason": "",
+                            "section_title": "",
+                            "commands": [],
+                        },
+                        {
+                            "id": "seg-999999",
+                            "corrected_text": "lixo",
+                            "paragraph_break_after": False,
+                            "remove_as_outtake": False,
+                            "outtake_reason": "",
+                            "section_title": "",
+                            "commands": [],
+                        },
+                    ]
+                },
+                "usage": {},
+            }
+
+    client = PartialClient()
+    result = TranscriptImprover(client=client, chunk_chars=10000).improve(
+        sample_transcription()
+    )
+    assert len(client.calls) == 1  # partial match → no retry required
+    ids = [item["id"] for item in result["proposals"]["segments"]]
+    assert ids == ["seg-000001", "seg-000002", "seg-000003"]
+    assert "lixo" not in result["improved_text"]
+
+
+def test_align_chunk_segments_stats():
+    central = [
+        {"id": "seg-000001", "text": "um"},
+        {"id": "seg-000002", "text": "dois"},
+    ]
+    raw = [{"id": "seg-000002", "corrected_text": "Dois."}]
+    aligned, stats = TranscriptImprover.align_chunk_segments(central, raw)
+    assert [row["id"] for row in aligned] == ["seg-000001", "seg-000002"]
+    assert aligned[0]["corrected_text"] == "um"
+    assert aligned[1]["corrected_text"] == "Dois."
+    assert stats["matched"] == 1
+    assert stats["missing_ids"] == ["seg-000001"]
+    assert stats["coverage"] == 0.5
+
+
+def test_chunking_respects_max_segments():
+    segments = TranscriptImprover.normalize_segments(
+        "",
+        [{"start": i, "end": i + 1, "text": f"seg {i} short"} for i in range(10)],
+    )
+    improver = TranscriptImprover(
+        client=FakeClient(), chunk_chars=100000, max_segments_per_chunk=3
+    )
+    chunks = improver.build_chunks(segments)
+    assert len(chunks) == 4  # 3+3+3+1
+    assert all(len(c["central"]) <= 3 for c in chunks)
 
 
 def test_cancel_before_first_call_does_not_invoke_model():
