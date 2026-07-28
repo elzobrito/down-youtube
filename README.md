@@ -284,22 +284,42 @@ ollama pull llama3
 
 ## Desktop Launcher
 
-The Linux desktop launcher `YouTube Transcriber` calls:
+A Linux `.desktop` entry can point at a small wrapper on your `PATH`, for example:
 
 ```text
-/home/elzobrito/.local/bin/youtube-transcriber
+~/.local/bin/youtube-transcriber
 ```
 
-On this workstation, that wrapper intentionally uses the local virtual
-environment:
+Typical wrapper shape (machine-agnostic paths — adjust to your install):
 
-```text
-/home/elzobrito/.local/opt/down-youtube-venv
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Prefer a dedicated venv, or fall back to the project checkout:
+ROOT="${DOWN_YOUTUBE_ROOT:-$HOME/desenvolvimento/down-youtube}"
+VENV="${DOWN_YOUTUBE_VENV:-$HOME/.local/opt/down-youtube-venv}"
+if [[ -x "$VENV/bin/python" ]]; then
+  exec "$VENV/bin/python" "$ROOT/main.py" "$@"
+fi
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  exec "$ROOT/.venv/bin/python" "$ROOT/main.py" "$@"
+fi
+exec python3 "$ROOT/main.py" "$@"
 ```
 
-This keeps the launcher independent from a project `.venv` stored inside a
-Google Drive-synchronized folder. If the launcher stops opening, first verify
-that the wrapper points to an existing Python executable.
+Optional env vars:
+
+| Variable | Purpose |
+| --- | --- |
+| `DOWN_YOUTUBE_ROOT` | Path to the repository checkout |
+| `DOWN_YOUTUBE_VENV` | Path to the Python virtualenv used by the launcher |
+
+Icon assets live under `assets/` (`icon.svg`, `icon.png`). A sample desktop file is
+`assets/youtube-transcriber.desktop` — copy it to `~/.local/share/applications/`
+and set `Exec=` / `Icon=` to paths that exist on **your** machine.
+
+If the launcher does not open, check that `Exec` points to an existing script and
+that the venv (or system) Python can import the project dependencies.
 
 ## Dependencies
 
@@ -425,8 +445,8 @@ defaults:
 | Problem | Fix |
 | --- | --- |
 | `yt-dlp` not found | Install dependencies with `python -m pip install -r requirements.txt` |
-| Desktop launcher does not open | Check `/home/elzobrito/.local/bin/youtube-transcriber` and the configured virtual environment path |
-| `customtkinter` not found | Reinstall dependencies in the launcher virtual environment |
+| Desktop launcher does not open | Check `Exec=` in the `.desktop` file, `~/.local/bin/youtube-transcriber` (or your wrapper), and `DOWN_YOUTUBE_ROOT` / `DOWN_YOUTUBE_VENV` |
+| `customtkinter` not found | Reinstall dependencies in the launcher virtual environment (`pip install -r requirements.txt`) |
 | YouTube asks for sign-in or bot confirmation | Export fresh cookies and configure them in Settings |
 | HTTP 403 | Try fresh cookies, a different network, or a VPN |
 | FFmpeg not found | Install FFmpeg or configure the exact binary path |
