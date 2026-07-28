@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -122,6 +123,52 @@ def init_database():
     _ensure_column(cursor, "transcriptions", "asr_preprocess_applied", "TEXT")
     _ensure_column(cursor, "transcriptions", "asr_preprocess_filter", "TEXT")
     _ensure_column(cursor, "transcriptions", "asr_preprocess_fallback_reason", "TEXT")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transcription_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transcription_id INTEGER NOT NULL,
+            revision_number INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft', 'approved', 'rejected')),
+            is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active IN (0, 1)),
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            glossary_version TEXT NOT NULL,
+            source_text_sha256 TEXT NOT NULL,
+            source_segments_sha256 TEXT,
+            improved_text TEXT NOT NULL,
+            improved_segments_json TEXT,
+            study_markdown TEXT,
+            proposals_json TEXT,
+            decisions_json TEXT,
+            outtakes_json TEXT,
+            word_count INTEGER NOT NULL DEFAULT 0,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            usage_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP,
+            approved_at TIMESTAMP,
+            UNIQUE(transcription_id, revision_number),
+            FOREIGN KEY (transcription_id)
+                REFERENCES transcriptions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_transcription_revision_active
+        ON transcription_revisions(transcription_id)
+        WHERE is_active = 1
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transcription_revision_status
+        ON transcription_revisions(transcription_id, status, revision_number DESC)
+        """
+    )
 
     cursor.execute(
         """
@@ -535,6 +582,370 @@ def save_transcription(
     return transcription_id
 
 
+def _revision_text_sha256(text):
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _revision_segments_sha256(segments):
+    if segments is None:
+        return None
+    payload = json.dumps(
+        segments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _json_or_none(value):
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _decode_json_or(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _revision_row_to_dict(row):
+    if row is None:
+        return None
+    keys = set(row.keys())
+
+    def field(name, default=None):
+        return row[name] if name in keys else default
+
+    return {
+        "id": field("id"),
+        "transcription_id": field("transcription_id"),
+        "revision_number": field("revision_number"),
+        "status": field("status"),
+        "is_active": int(field("is_active") or 0),
+        "model": field("model"),
+        "prompt_version": field("prompt_version"),
+        "glossary_version": field("glossary_version"),
+        "source_text_sha256": field("source_text_sha256"),
+        "source_segments_sha256": field("source_segments_sha256"),
+        "improved_text": field("improved_text") or "",
+        "improved_segments": _decode_json_or(field("improved_segments_json"), None),
+        "study_markdown": field("study_markdown") or "",
+        "proposals": _decode_json_or(field("proposals_json"), {}),
+        "decisions": _decode_json_or(field("decisions_json"), {}),
+        "outtakes": _decode_json_or(field("outtakes_json"), []),
+        "word_count": int(field("word_count") or 0),
+        "chunk_count": int(field("chunk_count") or 0),
+        "usage": _decode_json_or(field("usage_json"), {}),
+        "created_at": field("created_at"),
+        "updated_at": field("updated_at"),
+        "approved_at": field("approved_at"),
+    }
+
+
+def create_transcription_revision(
+    transcription_id,
+    *,
+    model,
+    prompt_version,
+    glossary_version,
+    improved_text,
+    improved_segments=None,
+    study_markdown="",
+    proposals=None,
+    decisions=None,
+    outtakes=None,
+    chunk_count=0,
+    usage=None,
+):
+    """Persist a complete draft without modifying the source transcription."""
+
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        source = cursor.execute(
+            "SELECT full_text, segments_json FROM transcriptions WHERE id = ?",
+            (transcription_id,),
+        ).fetchone()
+        if source is None:
+            raise ValueError(f"Transcrição inexistente: {transcription_id}")
+
+        source_segments = _decode_json_or(source["segments_json"], None)
+        revision_number = cursor.execute(
+            """
+            SELECT COALESCE(MAX(revision_number), 0) + 1
+            FROM transcription_revisions
+            WHERE transcription_id = ?
+            """,
+            (transcription_id,),
+        ).fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO transcription_revisions (
+                transcription_id, revision_number, status, is_active,
+                model, prompt_version, glossary_version,
+                source_text_sha256, source_segments_sha256,
+                improved_text, improved_segments_json, study_markdown,
+                proposals_json, decisions_json, outtakes_json,
+                word_count, chunk_count, usage_json
+            )
+            VALUES (?, ?, 'draft', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transcription_id,
+                revision_number,
+                model,
+                prompt_version,
+                glossary_version,
+                _revision_text_sha256(source["full_text"]),
+                _revision_segments_sha256(source_segments),
+                improved_text or "",
+                _json_or_none(improved_segments),
+                study_markdown or "",
+                _json_or_none(proposals or {}),
+                _json_or_none(decisions or {}),
+                _json_or_none(outtakes or []),
+                len((improved_text or "").split()),
+                int(chunk_count or 0),
+                _json_or_none(usage or {}),
+            ),
+        )
+        revision_id = cursor.lastrowid
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_transcription_revision(revision_id)
+
+
+def get_transcription_revision(revision_id):
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM transcription_revisions WHERE id = ?",
+            (revision_id,),
+        ).fetchone()
+        return _revision_row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def get_active_transcription_revision(transcription_id):
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM transcription_revisions
+            WHERE transcription_id = ? AND is_active = 1 AND status = 'approved'
+            ORDER BY revision_number DESC
+            LIMIT 1
+            """,
+            (transcription_id,),
+        ).fetchone()
+        return _revision_row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def list_transcription_revisions(transcription_id, include_rejected=True):
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    try:
+        if include_rejected:
+            rows = conn.execute(
+                """
+                SELECT * FROM transcription_revisions
+                WHERE transcription_id = ?
+                ORDER BY revision_number DESC
+                """,
+                (transcription_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM transcription_revisions
+                WHERE transcription_id = ? AND status != 'rejected'
+                ORDER BY revision_number DESC
+                """,
+                (transcription_id,),
+            ).fetchall()
+        return [_revision_row_to_dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def approve_transcription_revision(
+    revision_id,
+    *,
+    improved_text=None,
+    improved_segments=None,
+    study_markdown=None,
+    decisions=None,
+    outtakes=None,
+):
+    """Atomically activate one draft, rejecting stale source snapshots."""
+
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        revision = cursor.execute(
+            "SELECT * FROM transcription_revisions WHERE id = ?",
+            (revision_id,),
+        ).fetchone()
+        if revision is None:
+            raise ValueError(f"Revisão inexistente: {revision_id}")
+        if revision["status"] != "draft":
+            raise ValueError("Somente uma revisão draft pode ser aprovada")
+
+        source = cursor.execute(
+            "SELECT full_text, segments_json FROM transcriptions WHERE id = ?",
+            (revision["transcription_id"],),
+        ).fetchone()
+        if source is None:
+            raise ValueError("A transcrição de origem não existe mais")
+        source_segments = _decode_json_or(source["segments_json"], None)
+        if _revision_text_sha256(source["full_text"]) != revision["source_text_sha256"]:
+            raise ValueError("A transcrição original mudou desde a geração do draft")
+        if _revision_segments_sha256(source_segments) != revision["source_segments_sha256"]:
+            raise ValueError("Os segmentos originais mudaram desde a geração do draft")
+
+        final_text = (
+            revision["improved_text"] if improved_text is None else improved_text
+        ) or ""
+        final_segments = (
+            revision["improved_segments_json"]
+            if improved_segments is None
+            else _json_or_none(improved_segments)
+        )
+        final_markdown = (
+            revision["study_markdown"] if study_markdown is None else study_markdown
+        ) or ""
+        final_decisions = (
+            revision["decisions_json"]
+            if decisions is None
+            else _json_or_none(decisions)
+        )
+        final_outtakes = (
+            revision["outtakes_json"]
+            if outtakes is None
+            else _json_or_none(outtakes)
+        )
+
+        cursor.execute(
+            """
+            UPDATE transcription_revisions
+            SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE transcription_id = ? AND is_active = 1
+            """,
+            (revision["transcription_id"],),
+        )
+        cursor.execute(
+            """
+            UPDATE transcription_revisions
+            SET status = 'approved', is_active = 1,
+                improved_text = ?, improved_segments_json = ?,
+                study_markdown = ?, decisions_json = ?, outtakes_json = ?,
+                word_count = ?, updated_at = CURRENT_TIMESTAMP,
+                approved_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                final_text,
+                final_segments,
+                final_markdown,
+                final_decisions,
+                final_outtakes,
+                len(final_text.split()),
+                revision_id,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    approved = get_transcription_revision(revision_id)
+    try:
+        from core.rag_bridge import on_transcription_saved
+
+        on_transcription_saved(approved["transcription_id"])
+    except Exception:
+        pass
+    return approved
+
+
+def reject_transcription_revision(revision_id):
+    conn = _connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        row = cursor.execute(
+            "SELECT status, is_active FROM transcription_revisions WHERE id = ?",
+            (revision_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Revisão inexistente: {revision_id}")
+        if row[0] != "draft" or row[1]:
+            raise ValueError("Somente um draft inativo pode ser rejeitado")
+        cursor.execute(
+            """
+            UPDATE transcription_revisions
+            SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (revision_id,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    rejected = get_transcription_revision(revision_id)
+    try:
+        from core.rag_bridge import on_transcription_saved
+
+        on_transcription_saved(rejected["transcription_id"])
+    except Exception:
+        pass
+    return rejected
+
+
+def deactivate_transcription_revision(transcription_id):
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            UPDATE transcription_revisions
+            SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE transcription_id = ? AND is_active = 1
+            """,
+            (transcription_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        from core.rag_bridge import on_transcription_saved
+
+        on_transcription_saved(transcription_id)
+    except Exception:
+        pass
+
+
 def get_transcription(transcription_id):
     """Load one transcription with video metadata via named columns.
 
@@ -564,6 +975,26 @@ def get_transcription(transcription_id):
             t.created_at AS created_at,
             t.updated_at AS updated_at,
             COALESCE(t.is_used, 0) AS is_used,
+            ar.id AS active_revision_id,
+            ar.revision_number AS active_revision_number,
+            ar.status AS active_revision_status,
+            ar.model AS active_revision_model,
+            ar.prompt_version AS active_revision_prompt_version,
+            ar.glossary_version AS active_revision_glossary_version,
+            ar.source_text_sha256 AS active_revision_source_text_sha256,
+            ar.source_segments_sha256 AS active_revision_source_segments_sha256,
+            ar.improved_text AS active_revision_text,
+            ar.improved_segments_json AS active_revision_segments_json,
+            ar.study_markdown AS active_revision_study_markdown,
+            ar.proposals_json AS active_revision_proposals_json,
+            ar.decisions_json AS active_revision_decisions_json,
+            ar.outtakes_json AS active_revision_outtakes_json,
+            ar.word_count AS active_revision_word_count,
+            ar.chunk_count AS active_revision_chunk_count,
+            ar.usage_json AS active_revision_usage_json,
+            ar.created_at AS active_revision_created_at,
+            ar.updated_at AS active_revision_updated_at,
+            ar.approved_at AS active_revision_approved_at,
             v.title AS video_title,
             v.url AS video_url,
             v.channel AS channel,
@@ -572,6 +1003,10 @@ def get_transcription(transcription_id):
             v.video_path AS video_path
         FROM transcriptions t
         JOIN videos v ON t.video_id = v.id
+        LEFT JOIN transcription_revisions ar
+          ON ar.transcription_id = t.id
+         AND ar.is_active = 1
+         AND ar.status = 'approved'
         WHERE t.id = ?
         """,
         (transcription_id,),
@@ -582,12 +1017,68 @@ def get_transcription(transcription_id):
 
     if result:
         segments_raw = result["segments_json"]
+        original_segments = json.loads(segments_raw) if segments_raw else None
+        active_revision = None
+        if result["active_revision_id"] is not None:
+            active_revision = {
+                "id": result["active_revision_id"],
+                "transcription_id": result["id"],
+                "revision_number": result["active_revision_number"],
+                "status": result["active_revision_status"],
+                "is_active": 1,
+                "model": result["active_revision_model"],
+                "prompt_version": result["active_revision_prompt_version"],
+                "glossary_version": result["active_revision_glossary_version"],
+                "source_text_sha256": result["active_revision_source_text_sha256"],
+                "source_segments_sha256": result[
+                    "active_revision_source_segments_sha256"
+                ],
+                "improved_text": result["active_revision_text"] or "",
+                "improved_segments": _decode_json_or(
+                    result["active_revision_segments_json"], None
+                ),
+                "study_markdown": result["active_revision_study_markdown"] or "",
+                "proposals": _decode_json_or(
+                    result["active_revision_proposals_json"], {}
+                ),
+                "decisions": _decode_json_or(
+                    result["active_revision_decisions_json"], {}
+                ),
+                "outtakes": _decode_json_or(
+                    result["active_revision_outtakes_json"], []
+                ),
+                "word_count": int(result["active_revision_word_count"] or 0),
+                "chunk_count": int(result["active_revision_chunk_count"] or 0),
+                "usage": _decode_json_or(
+                    result["active_revision_usage_json"], {}
+                ),
+                "created_at": result["active_revision_created_at"],
+                "updated_at": result["active_revision_updated_at"],
+                "approved_at": result["active_revision_approved_at"],
+            }
+        effective_text = (
+            active_revision["improved_text"]
+            if active_revision is not None
+            else result["full_text"]
+        )
+        effective_segments = (
+            active_revision["improved_segments"]
+            if active_revision is not None
+            else original_segments
+        )
         return {
             "id": result["id"],
             "video_id": result["video_id"],
             "language": result["language"],
             "full_text": result["full_text"],
-            "segments": json.loads(segments_raw) if segments_raw else None,
+            "segments": original_segments,
+            "active_revision": active_revision,
+            "effective_text": effective_text,
+            "effective_segments": effective_segments,
+            "effective_word_count": len((effective_text or "").split()),
+            "study_markdown": (
+                active_revision["study_markdown"] if active_revision else ""
+            ),
             "word_count": result["word_count"],
             "duration": result["duration_seconds"],
             "model": result["model_used"],
@@ -717,12 +1208,27 @@ def search_transcriptions(query, limit=50):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT t.id, t.video_id, v.title, v.channel, t.word_count, t.language, t.created_at,
-               substr(t.full_text, max(1, instr(lower(t.full_text), lower(?)) - 50), 150)
+        SELECT t.id, t.video_id, v.title, v.channel,
+               COALESCE(ar.word_count, t.word_count), t.language, t.created_at,
+               substr(
+                   COALESCE(ar.improved_text, t.full_text),
+                   max(
+                       1,
+                       instr(
+                           lower(COALESCE(ar.improved_text, t.full_text)),
+                           lower(?)
+                       ) - 50
+                   ),
+                   150
+               )
                AS snippet
         FROM transcriptions t
         JOIN videos v ON t.video_id = v.id
-        WHERE t.full_text LIKE ?
+        LEFT JOIN transcription_revisions ar
+          ON ar.transcription_id = t.id
+         AND ar.is_active = 1
+         AND ar.status = 'approved'
+        WHERE COALESCE(ar.improved_text, t.full_text) LIKE ?
         ORDER BY t.created_at DESC
         LIMIT ?
         """,
@@ -738,10 +1244,15 @@ def get_all_transcriptions(limit=100, offset=0):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT t.id, v.title, v.channel, t.language, t.word_count,
+        SELECT t.id, v.title, v.channel, t.language,
+               COALESCE(ar.word_count, t.word_count),
                t.duration_seconds, t.created_at, COALESCE(t.is_used, 0)
         FROM transcriptions t
         JOIN videos v ON t.video_id = v.id
+        LEFT JOIN transcription_revisions ar
+          ON ar.transcription_id = t.id
+         AND ar.is_active = 1
+         AND ar.status = 'approved'
         ORDER BY t.created_at DESC
         LIMIT ? OFFSET ?
         """,
@@ -755,6 +1266,10 @@ def get_all_transcriptions(limit=100, offset=0):
 def delete_transcription(transcription_id):
     conn = _connect()
     cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM transcription_revisions WHERE transcription_id = ?",
+        (transcription_id,),
+    )
     cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
     conn.commit()
     conn.close()
@@ -774,10 +1289,14 @@ def get_transcription_stats():
         """
         SELECT
             COUNT(*) AS total,
-            SUM(word_count) AS total_words,
-            SUM(duration_seconds) AS total_duration,
-            AVG(word_count) AS avg_words
-        FROM transcriptions
+            SUM(COALESCE(ar.word_count, t.word_count)) AS total_words,
+            SUM(t.duration_seconds) AS total_duration,
+            AVG(COALESCE(ar.word_count, t.word_count)) AS avg_words
+        FROM transcriptions t
+        LEFT JOIN transcription_revisions ar
+          ON ar.transcription_id = t.id
+         AND ar.is_active = 1
+         AND ar.status = 'approved'
         """
     )
     result = cursor.fetchone()

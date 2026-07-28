@@ -51,6 +51,8 @@ DEFAULT_SETTINGS = {
     "notifications_enabled": "1",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3",
+    # Dedicated local model for conservative post-ASR transcript improvement.
+    "transcript_improvement_model": "phi4-mini:latest",
     "use_streaming_pipeline": "1",  # Ativar pipeline paralelo por padrão
     # Long-term memory (rag-sqlite projection) — see docs/plans/PLAN-youtube-ltm-rag.md
     "rag_enabled": "1",

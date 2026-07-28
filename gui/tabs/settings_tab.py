@@ -337,7 +337,9 @@ class SettingsTab(ttk.Frame):
         theme_combo.pack(anchor=tk.W, pady=5)
         theme_combo.bind("<<ComboboxSelected>>", self._change_theme)
 
-        ollama_frame = ttk.LabelFrame(scrollable_frame, text="Integracao Ollama (Chat)", padding=15)
+        ollama_frame = ttk.LabelFrame(
+            scrollable_frame, text="Integracao Ollama", padding=15
+        )
         ollama_frame.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Label(ollama_frame, text="URL Servidor:").grid(row=0, column=0, sticky=tk.W, pady=5)
@@ -350,6 +352,26 @@ class SettingsTab(ttk.Frame):
         self.ollama_model_var = tk.StringVar(value=get_setting("ollama_model"))
         ttk.Entry(ollama_frame, textvariable=self.ollama_model_var, width=20).grid(
             row=1, column=1, sticky=tk.W, padx=5, pady=5
+        )
+
+        ttk.Label(ollama_frame, text="Modelo aprimoramento:").grid(
+            row=2, column=0, sticky=tk.W, pady=5
+        )
+        self.transcript_improvement_model_var = tk.StringVar(
+            value=get_setting("transcript_improvement_model") or "phi4-mini:latest"
+        )
+        improvement_model_entry = ttk.Entry(
+            ollama_frame,
+            textvariable=self.transcript_improvement_model_var,
+            width=24,
+        )
+        improvement_model_entry.grid(
+            row=2, column=1, sticky=tk.W, padx=5, pady=5
+        )
+        ToolTip(
+            improvement_model_entry,
+            "Modelo local usado pelo botão Aprimorar IA na Biblioteca. "
+            "Padrão: phi4-mini:latest.",
         )
 
         memory_frame = ttk.LabelFrame(
@@ -571,6 +593,10 @@ class SettingsTab(ttk.Frame):
         set_setting("use_streaming_pipeline", "1" if self.streaming_var.get() else "0")
         set_setting("ollama_url", self.ollama_url_var.get())
         set_setting("ollama_model", self.ollama_model_var.get())
+        set_setting(
+            "transcript_improvement_model",
+            self.transcript_improvement_model_var.get().strip() or "phi4-mini:latest",
+        )
         set_setting("rag_enabled", "1" if self.rag_enabled_var.get() else "0")
         set_setting("rag_embedding_provider", self.rag_provider_var.get().strip() or "hash")
         set_setting("rag_embedding_model", self.rag_model_var.get().strip() or "embeddinggemma")

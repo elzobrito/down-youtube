@@ -248,7 +248,9 @@ def _build_markdown(row: Dict[str, Any]) -> str:
     language = row.get("language") or ""
     youtube_id = row.get("youtube_video_id") or ""
     video_db_id = row.get("video_id")
-    body = (row.get("full_text") or "").strip()
+    body = (row.get("effective_text") or row.get("full_text") or "").strip()
+    active_revision = row.get("active_revision") or {}
+    revision_id = active_revision.get("id")
     front = [
         "---",
         f"transcription_id: {tid}",
@@ -257,6 +259,8 @@ def _build_markdown(row: Dict[str, Any]) -> str:
         f"title: {_yaml_escape(title)}",
         f"channel: {_yaml_escape(channel)}",
         f"language: {_yaml_escape(language)}",
+        f"revision_id: {revision_id if revision_id is not None else 'original'}",
+        f"text_version: {'improved' if revision_id is not None else 'original'}",
         "source: down-youtube",
         f"url: {_yaml_escape(url)}",
         "indexed_for: long-term-memory",
@@ -431,7 +435,7 @@ def project_transcription(transcription_id: int) -> Dict[str, Any]:
     row = get_transcription(transcription_id)
     if not row:
         return {"transcription_id": transcription_id, "status": "missing"}
-    text = (row.get("full_text") or "").strip()
+    text = (row.get("effective_text") or row.get("full_text") or "").strip()
     if not text:
         return {"transcription_id": transcription_id, "status": "empty"}
 
@@ -451,6 +455,7 @@ def project_transcription(transcription_id: int) -> Dict[str, Any]:
             "source_path": str(path.resolve()),
             "filename": path.name,
             "language": row.get("language") or "",
+            "revision_id": (row.get("active_revision") or {}).get("id"),
             "content_hash": _content_hash(md),
             "updated_at": _utc_now(),
         }

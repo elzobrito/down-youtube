@@ -113,7 +113,9 @@ Notes:
 - Builds an optional **long-term memory** projection via
   [rag-sqlite](https://github.com/elzobrito/rag-sqlite) (`youtube_rag.sqlite` +
   `rag_corpus/`) for retrieval-augmented chat across the library.
-- Exports transcripts as TXT, SRT, VTT, DOCX, and PDF.
+- Exports transcripts as TXT, SRT, VTT, DOCX, PDF, and Markdown.
+- Can create a local, reviewable **Phi-4 Mini** post-ASR draft while keeping
+  the original transcription immutable.
 - Provides an optional Ollama chat window for asking questions about completed
   transcriptions (with LTM `remember` scope: current video or full library).
 - Includes a streaming pipeline that overlaps download and conversion work,
@@ -134,12 +136,12 @@ Implemented user-facing capabilities:
 | Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
 | Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash; **long audio (>60 min) → 30 min chunks**, merge with timestamp offsets, cancel/progress across chunks |
 | Queue | Add URLs, import `.txt` lists, process pending/failed items, retry count tracking, remove selected items, clear queue |
-| Library | Full-text search, language filter, preview pane, open full transcript, copy text, delete transcript, mark/unmark as used |
+| Library | Full-text search, language filter, Original/Aprimorada/Estudo preview, local IA draft/review history, open/copy/delete, mark/unmark as used |
 | Media access | Open saved audio or video files through the operating system |
-| Export | TXT, SRT, VTT, DOCX, and PDF export for selected transcriptions |
+| Export | TXT, SRT, VTT, DOCX, PDF, and Markdown export for the version displayed |
 | Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription; LTM retrieval (`remember`) with video vs full-library scope |
 | History | Processing records, status tracking, failed-item reprocessing |
-| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, **Light/Dark (Custom)** themes, notifications, streaming pipeline, Ollama URL/model, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
+| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, **Light/Dark (Custom)** themes, notifications, streaming pipeline, independent Ollama chat/improvement models, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
 | Long-term memory | `core/rag_bridge.py` projects transcriptions to `rag_corpus/`, indexes via rag-sqlite CLI, manifest lookup for citations, durable index queue |
 | Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
 | Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
@@ -276,11 +278,25 @@ model file.
 
 ### Ollama
 
-Ollama is optional and only needed for the chat feature.
+Ollama is optional and supports both Chat IA and the post-ASR improvement
+workflow. The two features have independent model settings. For the default
+improvement model:
 
 ```bash
-ollama pull llama3
+ollama pull phi4-mini:latest
 ```
+
+In Biblioteca, select a transcription and choose **Aprimorar IA**. Processing
+runs sequentially in background chunks and creates a draft; it never replaces
+the original. Review each proposed correction/outtake, then either approve the
+selection or reject the draft. Only an approved revision becomes the effective
+text used by search, Chat IA, and RAG. **Usar original** deactivates that
+revision and schedules the original for RAG reindexing.
+
+The study Markdown is derived deterministically from the faithful corrected
+text. Commands found in speech are displayed as text only and are never
+executed. Unknown lexical rewrites remain unselected until a person approves
+them.
 
 ## Desktop Launcher
 
@@ -568,6 +584,7 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 | `settings` | Key-value app configuration |
 | `videos` | Video metadata, source URLs, channels, duration, and file paths |
 | `transcriptions` | Transcript text, segment JSON, audio hash, and usage flag |
+| `transcription_revisions` | Immutable-origin improvement drafts, approvals, selected proposals, faithful segments, and study Markdown |
 | `translations` | Translated transcript text |
 | `history` | Processing attempts, status, and timing |
 | `queue` | Desktop “Fila” tab pending/failed URLs |

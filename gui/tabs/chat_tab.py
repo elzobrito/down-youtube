@@ -206,7 +206,11 @@ class ChatWindow(tk.Toplevel):
                 mem_status = f"Memoria: erro ({exc})"
 
         if fallback and not library:
-            full = self.transcription.get("full_text") or ""
+            full = (
+                self.transcription.get("effective_text")
+                or self.transcription.get("full_text")
+                or ""
+            )
             if len(full) > max_chars:
                 full = full[:max_chars] + "\n…[truncated]"
             return f"Contexto da Transcricao:\n\n{full}\n\n", mem_status + " · fallback full_text"

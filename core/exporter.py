@@ -7,6 +7,10 @@ class Exporter:
         Path(filepath).write_text(text or "", encoding="utf-8")
 
     @staticmethod
+    def to_markdown(text, filepath):
+        Path(filepath).write_text(text or "", encoding="utf-8")
+
+    @staticmethod
     def to_srt(segments, filepath):
         if not segments:
             Path(filepath).write_text("", encoding="utf-8")
