@@ -594,6 +594,30 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 
 ## Changelog
 
+### v3.4 — AI transcript improvement (Biblioteca)
+
+- Biblioteca **Aprimorar IA**: threaded improve with progress and cancel.
+- Independent Ollama model setting (default `phi4-mini:latest`), separate from chat.
+- Revisions as **draft / approved / rejected**; original text and hashes preserved.
+- Side-by-side compare; per-item accept of corrections, suggestions, and outtakes.
+- Dangerous shell-like commands are alerted and **never executed**.
+- Views: Original, Aprimorada, Estudo.
+- Search, stats, Chat IA, and RAG use the improved text **only after approval**.
+- Export TXT / DOCX / PDF / SRT / VTT / Markdown follows the displayed version.
+- Deactivating a revision restores and reindexes the original.
+- Plan: [docs/plans/PLAN-transcript-improvement-phi4.md](docs/plans/PLAN-transcript-improvement-phi4.md); QA: [docs/qa/YT-TRANSCRIPT-IMPROVE-QA-001.md](docs/qa/YT-TRANSCRIPT-IMPROVE-QA-001.md).
+
+### v3.3 — ASR preprocess and reliability
+
+- Optional **ASR audio preprocess** before Whisper: Settings presets `off` / `light` / `speech` (FFmpeg filters; default `off`).
+- Atomic WAV replace, provenance (`source_audio_hash`, applied preset/filter), job/batch preset freeze.
+- Does not separate music beds or overlapping speakers; medium/large recommended for difficult audio.
+- Job leases / heartbeat, orphan recovery, RAG queue fairness and retry behavior.
+- Multisite identity hardening (`source_site` + `video_id`).
+- Progress bars complete and keep per-stage snapshots; general stats panel (disk, CPU, threads).
+- README desktop launcher paths made machine-agnostic.
+- Plan: [docs/plans/PLAN-asr-audio-preprocess.md](docs/plans/PLAN-asr-audio-preprocess.md); QA: [docs/qa/YT-ASR-PREPROCESS-QA-001.md](docs/qa/YT-ASR-PREPROCESS-QA-001.md).
+
 ### v3.2 — Application layer (GUI + CLI + API)
 
 - Shared `app/` layer: job queue, library facade, single worker bridge to `core.worker`.
@@ -605,6 +629,12 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 - Best video/audio quality options in Settings.
 - App icon: `assets/icon.svg` (+ PNG exports); window icon on GUI start.
 - Docs: [docs/guides/web-api.md](docs/guides/web-api.md).
+
+### v3.1 — Long audio, playlists, and local RAG
+
+- Long-audio chunking for Whisper (split above threshold; default >60 min into 30 min pieces) to reduce end-of-file hallucination loops.
+- Playlist expansion into per-video jobs.
+- Optional long-term memory via `rag-sqlite` (index on save, chat context, scopes).
 
 ### v3.0
 
