@@ -1,13 +1,28 @@
 # YouTube Transcriber (down-youtube)
 
+ASCII logo (raster of [`assets/icon.svg`](assets/icon.svg): disc + play/download, waveform, transcript lines, AI spark):
+
+```text
+    ╭────────────────────────────────────╮
+    │                              ✦     │
+    │      ╭──────────────╮   ▐▌  ▐█     │
+    │    ╱                  ╲  ▐█  ██▌    │
+    │   │     ▶ · · · ·     │  ██▌ ███▌   │
+    │   │     ▶   │         │  ███▌███    │
+    │   │     ▶   ▼         │  ▐█  ▐▌     │
+    │    ╲     ╲ ╱  ╱      ╱   ────────── │
+    │      ╰─────╳─────╯      ────────    │
+    │                        ──────      │
+    ╰────────────────────────────────────╯
+         YouTube Transcriber · down-youtube
+```
+
 Local-first tool for downloading, transcribing, organizing, and exporting media.
 **YouTube** is first-class; other sites (e.g. Vimeo, X/Twitter) work **best-effort**
 via `yt-dlp`. Local files are supported. Stack: `yt-dlp`, FFmpeg, `whisper.cpp`,
 SQLite, optional Ollama + [rag-sqlite](https://github.com/elzobrito/rag-sqlite).
 
-<p align="center">
-  <img src="assets/icon.svg" alt="YouTube Transcriber icon" width="128" height="128"/>
-</p>
+Window / desktop icon: [`assets/icon.svg`](assets/icon.svg) (+ PNG exports).
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
