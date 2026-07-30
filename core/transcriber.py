@@ -9,8 +9,9 @@ from core.audio import AudioProcessor
 
 
 # Defaults aligned with config.DEFAULT_SETTINGS
-DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS = 3600.0  # > 60 minutes
-DEFAULT_CHUNK_SECONDS = 1800.0  # 30 minutes
+DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS = 600.0  # > 10 minutes
+DEFAULT_CHUNK_SECONDS = 300.0  # 5-minute owned intervals
+DEFAULT_CHUNK_OVERLAP_SECONDS = 5.0
 
 
 class Transcriber:
@@ -30,6 +31,13 @@ class Transcriber:
         cancel_check_callback=None,
         long_audio_threshold_seconds=DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS,
         chunk_seconds=DEFAULT_CHUNK_SECONDS,
+        chunk_overlap_seconds=DEFAULT_CHUNK_OVERLAP_SECONDS,
+        prefer_silence_chunks=True,
+        silence_search_seconds=15,
+        vad_enabled=False,
+        vad_model_path="",
+        max_context=0,
+        suppress_nst=True,
         ffmpeg_path="ffmpeg",
     ):
         self.cli_path = cli_path
@@ -44,9 +52,17 @@ class Transcriber:
         self.cancel_check = cancel_check_callback or (lambda: False)
         self.long_audio_threshold_seconds = float(long_audio_threshold_seconds)
         self.chunk_seconds = float(chunk_seconds)
+        self.chunk_overlap_seconds = float(chunk_overlap_seconds)
+        self.prefer_silence_chunks = bool(prefer_silence_chunks)
+        self.silence_search_seconds = float(silence_search_seconds)
+        self.vad_enabled = bool(vad_enabled)
+        self.vad_model_path = str(vad_model_path or "").strip()
+        self.max_context = int(max_context)
+        self.suppress_nst = bool(suppress_nst)
         self.ffmpeg_path = ffmpeg_path
         self.last_error = None
         self.last_segments = None
+        self.last_suppressed_repeat_segments = 0
         self._gpu_notice_logged = False
 
     def _log(self, message):
@@ -70,7 +86,8 @@ class Transcriber:
         if AudioProcessor.should_chunk_duration(duration, self.long_audio_threshold_seconds):
             self._log(
                 f"ℹ️ Áudio longo ({duration:.0f}s > {self.long_audio_threshold_seconds:.0f}s): "
-                f"transcrição em pedaços de {self.chunk_seconds:.0f}s."
+                f"transcrição em pedaços de {self.chunk_seconds:.0f}s "
+                f"com {self.chunk_overlap_seconds:.0f}s de sobreposição."
             )
             return self._transcribe_chunked(audio_path, output_dir, duration)
 
@@ -80,6 +97,7 @@ class Transcriber:
         """Split long audio, transcribe each piece, merge TXT/SRT with time offsets."""
         self.last_error = None
         self.last_segments = None
+        self.last_suppressed_repeat_segments = 0
         audio_processor = AudioProcessor(
             ffmpeg_path=self.ffmpeg_path,
             logger=self.logger,
@@ -97,6 +115,9 @@ class Transcriber:
                 chunk_seconds=self.chunk_seconds,
                 output_dir=temp_dir,
                 prefix=Path(audio_path).stem + "_part",
+                overlap_seconds=self.chunk_overlap_seconds,
+                prefer_silence=self.prefer_silence_chunks,
+                silence_search_seconds=self.silence_search_seconds,
             )
             if not chunks:
                 self.last_error = "Falha ao fatiar audio longo"
@@ -105,12 +126,14 @@ class Transcriber:
 
             chunk_paths = [c["path"] for c in chunks]
             n = len(chunks)
-            self._log(f"ℹ️ {n} pedaço(s) de até {self.chunk_seconds:.0f}s para Whisper.")
+            self._log(
+                f"ℹ️ {n} pedaço(s) de ~{self.chunk_seconds:.0f}s para Whisper; "
+                f"overlap={self.chunk_overlap_seconds:.0f}s, "
+                f"corte_em_silencio={'sim' if self.prefer_silence_chunks else 'não'}."
+            )
 
             merged_segments = []
-            txt_parts = []
-            srt_blocks = []
-            cue_index = 1
+            fallback_text = ""
             wall_start = time.perf_counter()
 
             for chunk in chunks:
@@ -121,6 +144,7 @@ class Transcriber:
                 idx = chunk["index"]
                 offset = float(chunk["start"])
                 chunk_duration = float(chunk["length"])
+                owned_start = float(chunk.get("owned_start", offset))
                 self._progress(
                     {
                         "stage": "transcription",
@@ -169,26 +193,30 @@ class Transcriber:
                     return None
 
                 text = self._read_text(txt_path)
-                if text:
-                    txt_parts.append(text.strip())
 
                 srt_path = self._srt_path_for_txt(txt_path)
                 if srt_path and srt_path.exists():
                     shifted = self._shift_srt_content(self._read_text(srt_path), offset)
-                    blocks, next_index = self._renumber_srt_blocks(shifted, cue_index)
-                    srt_blocks.extend(blocks)
-                    cue_index = next_index
-                    for seg in self._parse_srt(shifted) or []:
-                        merged_segments.append(seg)
+                    merged_segments = self._merge_timestamped_segments(
+                        merged_segments,
+                        self._parse_srt(shifted) or [],
+                        owned_start=owned_start,
+                    )
                 elif text:
                     # Fallback segment without fine timing
-                    merged_segments.append(
+                    merged_segments = self._merge_timestamped_segments(
+                        merged_segments,
+                        [
                         {
                             "start": offset,
                             "end": offset + chunk_duration,
                             "text": text.strip(),
                         }
+                        ],
+                        owned_start=owned_start,
                     )
+                if text:
+                    fallback_text = self._merge_text_overlap(fallback_text, text.strip())
 
             if self.cancel_check():
                 self.last_error = "Processamento cancelado"
@@ -199,10 +227,17 @@ class Transcriber:
             # Prefer writing beside the source audio (same as single-pass whisper layout)
             final_txt.parent.mkdir(parents=True, exist_ok=True)
 
-            full_text = "\n".join(part for part in txt_parts if part).strip() + ("\n" if txt_parts else "")
+            segment_text = "\n".join(
+                str(segment.get("text") or "").strip()
+                for segment in merged_segments
+                if str(segment.get("text") or "").strip()
+            )
+            full_text = (segment_text or fallback_text).strip()
+            if full_text:
+                full_text += "\n"
             final_txt.write_text(full_text, encoding="utf-8")
 
-            srt_body = "\n\n".join(srt_blocks).strip() + ("\n" if srt_blocks else "")
+            srt_body = self._segments_to_srt(merged_segments)
             final_srt.write_text(srt_body, encoding="utf-8")
 
             # Also place copies in output_dir when it differs from the audio folder
@@ -215,6 +250,11 @@ class Transcriber:
                 final_txt = out_txt
 
             self.last_segments = merged_segments or None
+            if self.last_suppressed_repeat_segments:
+                self._log(
+                    "ℹ️ Proteção anti-loop removeu "
+                    f"{self.last_suppressed_repeat_segments} segmento(s) repetido(s)."
+                )
             self._progress(
                 {
                     "stage": "transcription",
@@ -275,6 +315,29 @@ class Transcriber:
                 comando.extend(["--best-of", str(self.best_of)])
             elif self._cli_supports_option("-bo"):
                 comando.extend(["-bo", str(self.best_of)])
+
+        if self.max_context >= 0 and self._cli_supports_option("--max-context"):
+            comando.extend(["--max-context", str(self.max_context)])
+
+        if self.suppress_nst and self._cli_supports_option("--suppress-nst"):
+            comando.append("--suppress-nst")
+
+        if self.vad_enabled:
+            if not self.vad_model_path or not Path(self.vad_model_path).is_file():
+                self._log(
+                    "⚠️ VAD solicitado, mas o modelo VAD não existe; "
+                    "transcrição seguirá sem VAD."
+                )
+            elif self._cli_supports_option("--vad") and self._cli_supports_option(
+                "--vad-model"
+            ):
+                comando.extend(["--vad", "--vad-model", self.vad_model_path])
+                if self._cli_supports_option("--vad-max-speech-duration-s"):
+                    comando.extend(["--vad-max-speech-duration-s", "30"])
+                if self._cli_supports_option("--vad-samples-overlap"):
+                    comando.extend(["--vad-samples-overlap", "0.20"])
+            else:
+                self._log("⚠️ whisper-cli atual não oferece VAD; opção ignorada.")
 
         if self.use_gpu and not self._gpu_notice_logged:
             self._log("ℹ️ GPU ativada: use um whisper-cli compilado com CUDA.")
@@ -467,6 +530,107 @@ class Transcriber:
             blocks.append(block_text)
             index += 1
         return blocks, index
+
+    def _merge_timestamped_segments(self, existing, incoming, owned_start):
+        """Merge a chunk while dropping timestamp/text duplicates in its overlap."""
+        merged = [dict(segment) for segment in existing]
+        boundary_limit = float(owned_start) + self.chunk_overlap_seconds + 2.0
+        repeat_norm = ""
+        repeat_count = 0
+        repeat_end = -1.0
+        for prior in reversed(merged):
+            prior_norm = self._normalize_overlap_text(prior.get("text") or "")
+            if not repeat_norm:
+                repeat_norm = prior_norm
+                repeat_end = float(prior.get("end") or prior.get("start") or 0.0)
+                repeat_count = 1
+            elif prior_norm == repeat_norm:
+                repeat_count += 1
+            else:
+                break
+        for raw_segment in incoming:
+            segment = dict(raw_segment)
+            start = float(segment.get("start") or 0.0)
+            end = float(segment.get("end") or start)
+            text = str(segment.get("text") or "").strip()
+            midpoint = start + max(0.0, end - start) / 2.0
+            if (
+                not text
+                or (
+                    float(owned_start) > 0
+                    and midpoint < float(owned_start) - 0.01
+                )
+            ):
+                continue
+
+            normalized = self._normalize_overlap_text(text)
+            duplicate = False
+            if float(owned_start) > 0 and start <= boundary_limit:
+                for prior in reversed(merged[-8:]):
+                    prior_text = self._normalize_overlap_text(prior.get("text") or "")
+                    if normalized != prior_text:
+                        continue
+                    prior_start = float(prior.get("start") or 0.0)
+                    prior_end = float(prior.get("end") or prior_start)
+                    if start <= prior_end + 2.0 and end >= prior_start - 2.0:
+                        duplicate = True
+                        break
+            if not duplicate:
+                if normalized and normalized == repeat_norm and start <= repeat_end + 2.0:
+                    repeat_count += 1
+                    repeat_end = max(repeat_end, end)
+                else:
+                    repeat_norm = normalized
+                    repeat_count = 1
+                    repeat_end = end
+                if repeat_count > 2:
+                    duplicate = True
+                    self.last_suppressed_repeat_segments += 1
+            if not duplicate:
+                segment["start"] = start
+                segment["end"] = max(start, end)
+                segment["text"] = text
+                merged.append(segment)
+        merged.sort(key=lambda item: (float(item.get("start") or 0.0), float(item.get("end") or 0.0)))
+        return merged
+
+    @classmethod
+    def _merge_text_overlap(cls, accumulated, next_text, max_words=80):
+        """Fallback de-duplication for Whisper builds that do not emit SRT."""
+        left = str(accumulated or "").strip()
+        right = str(next_text or "").strip()
+        if not left:
+            return right
+        if not right:
+            return left
+        left_words = left.split()
+        right_words = right.split()
+        limit = min(max_words, len(left_words), len(right_words))
+        overlap = 0
+        for size in range(limit, 0, -1):
+            left_norm = [cls._normalize_overlap_text(word) for word in left_words[-size:]]
+            right_norm = [cls._normalize_overlap_text(word) for word in right_words[:size]]
+            if left_norm == right_norm:
+                overlap = size
+                break
+        remainder = " ".join(right_words[overlap:]).strip()
+        return f"{left}\n{remainder}".strip() if remainder else left
+
+    @staticmethod
+    def _normalize_overlap_text(text):
+        return re.sub(r"[^\w]+", " ", str(text).casefold()).strip()
+
+    @classmethod
+    def _segments_to_srt(cls, segments):
+        blocks = []
+        for index, segment in enumerate(segments or [], start=1):
+            text = str(segment.get("text") or "").strip()
+            if not text:
+                continue
+            start = cls._seconds_to_srt_time(float(segment.get("start") or 0.0))
+            end = cls._seconds_to_srt_time(float(segment.get("end") or 0.0))
+            blocks.append(f"{index}\n{start} --> {end}\n{text}")
+        return "\n\n".join(blocks).strip() + ("\n" if blocks else "")
 
     def _cli_supports_option(self, option):
         help_text = self._get_cli_help()

@@ -120,9 +120,9 @@ Notes:
 - Processes local audio/video files without requiring a URL.
 - Transcribes locally through `whisper.cpp`, using CPU or GPU builds depending
   on the installed backend.
-- **Long audio (>60 minutes)** is automatically split into **30-minute chunks**,
-  transcribed per piece, then merged with corrected SRT/TXT timestamps (reduces
-  end-of-file Whisper hallucination loops on long interviews).
+- **Long audio (>10 minutes)** is automatically split into **5-minute owned
+  intervals** with 5-second overlap and silence-aware cuts, then merged with
+  timestamp de-duplication (reduces prolonged Whisper hallucination loops).
 - Stores history, queues, settings, transcriptions, translations, and chat
   sessions in SQLite.
 - Builds an optional **long-term memory** projection via
@@ -149,14 +149,14 @@ Implemented user-facing capabilities:
 | Jobs / API | Async job queue (`app.jobs`); CLI `python -m cli`; FastAPI `POST/GET /v1/jobs`, `GET /v1/library`, `GET /v1/health` |
 | Download | `yt-dlp` audio/video download (YouTube-aware opts only on YouTube hosts), cookies, progress hooks, streaming→traditional fallback, optional best video/audio quality settings |
 | Conversion | FFmpeg audio extraction, normalization, WAV conversion, media duration detection |
-| Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU flag, duplicate detection by audio hash; **long audio (>60 min) → 30 min chunks**, merge with timestamp offsets, cancel/progress across chunks |
+| Transcription | `whisper.cpp` execution, language selection, thread/beam/best-of settings, optional GPU/VAD/context hardening, duplicate detection by audio hash; **long audio (>10 min) → 5 min overlap/silence-aware chunks**, timestamp de-duplication, cancel/progress across chunks |
 | Queue | Add URLs, import `.txt` lists, process pending/failed items, retry count tracking, remove selected items, clear queue |
 | Library | Full-text search, language filter, Original/Aprimorada/Estudo preview, local IA draft/review history, open/copy/delete, mark/unmark as used |
 | Media access | Open saved audio or video files through the operating system |
 | Export | TXT, SRT, VTT, DOCX, PDF, and Markdown export for the version displayed |
 | Chat | Ollama connection check, model configuration, streamed chat responses, persistent chat sessions per transcription; LTM retrieval (`remember`) with video vs full-library scope |
 | History | Processing records, status tracking, failed-item reprocessing |
-| Settings | FFmpeg path, whisper CLI path, model path, output directory, cookies path, language, performance, **Light/Dark (Custom)** themes, notifications, streaming pipeline, independent Ollama chat/improvement models, LTM health/backfill; long-audio defaults `whisper_long_audio_threshold_seconds=3600`, `whisper_chunk_seconds=1800`; **video_download_best_quality** (max yt-dlp video when keeping original) |
+| Settings | FFmpeg path, whisper CLI/model/VAD paths, output directory, cookies path, language, performance, **Light/Dark (Custom)** themes, notifications, streaming pipeline, independent Ollama chat/improvement models, LTM health/backfill; long-audio defaults `threshold=600s`, `chunk=300s`, `overlap=5s`, silence-aware cuts; optional `--max-context` and `--suppress-nst`; **video_download_best_quality** (max yt-dlp video when keeping original) |
 | Long-term memory | `core/rag_bridge.py` projects transcriptions to `rag_corpus/`, indexes via rag-sqlite CLI, manifest lookup for citations, durable index queue |
 | Diagnostics | FFmpeg test button, stage progress panels, system stats, enhanced log with save/clear, NERD metrics panel |
 | Notifications | Windows toast notifications through `winotify`; Linux desktop notifications through `notify-send` |
@@ -397,20 +397,28 @@ files (for example multi-hour interviews). To reduce that failure mode:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `whisper_long_audio_threshold_seconds` | `3600` | Only audios **longer than 60 minutes** are split |
-| `whisper_chunk_seconds` | `1800` | Each piece is at most **30 minutes** |
+| `whisper_long_audio_threshold_seconds` | `600` | Only audios **longer than 10 minutes** are split |
+| `whisper_chunk_seconds` | `300` | Each owned interval is at most **5 minutes** |
+| `whisper_chunk_overlap_seconds` | `5` | Context repeated at boundaries and removed by timestamps |
+| `whisper_prefer_silence_chunks` | `1` | Moves cuts toward a quiet point in the preceding 15 seconds |
+| `whisper_vad_enabled` | `1` | Enables whisper.cpp VAD when a configured or nearby Silero model exists |
+| `whisper_max_context` | `0` | Disables stored text context (`-1` restores the CLI default) |
+| `whisper_suppress_nst` | `1` | Passes `--suppress-nst` when supported |
 
 Pipeline:
 
 ```text
-duration > 60 min
-  -> split WAV into N chunks of ≤30 min (pure wave I/O)
+duration > 10 min
+  -> split WAV into N owned intervals of ≤5 min (pure wave I/O)
+  -> move each boundary backwards toward nearby silence
+  -> prepend 5 s overlap to every chunk after the first
   -> whisper-cli once per chunk
-  -> merge TXT + SRT with time offsets (chunk_i * 30 min)
+  -> merge TXT + SRT with real offsets and remove overlap duplicates by timestamp
+  -> cap exact contiguous repetition loops at two occurrences
   -> delete temporary chunk files
 ```
 
-Audios **≤ 60 minutes** keep a single Whisper pass (no split).
+Audios **≤ 10 minutes** keep a single Whisper pass (no split).
 
 Progress shows `Pedaço i/N`. Cancel stops the current chunk and cleans temps.
 Chunked mode is wired from `core/worker.py` via `core/transcriber.py` and
@@ -497,7 +505,7 @@ defaults:
 | GPU does not work | Rebuild `whisper.cpp` with the desired GPU backend, or disable GPU mode |
 | Ollama does not connect | Confirm that `ollama serve` is running and the configured model exists |
 | Chat returns no response | Check the Ollama URL, model name, and server logs |
-| Transcript ends with endless repeated phrases | Enable chunking (defaults on for >60 min) and reprocess; use a better Whisper model if ASR quality is still poor |
+| Transcript ends with endless repeated phrases | Reprocess with the default 5-minute overlap/silence-aware chunking; optionally test VAD, `max-context=0`, `--suppress-nst`, or a better Whisper model |
 | Poor ASR with background music/noise | Try Settings → Pre-processamento ASR → Leve or Fala; use medium/large model. Filters do not separate music or overlapping voices |
 | `maximum recursion depth exceeded` on long audio | Fixed in current tree: chunk progress must not re-enter the progress callback; pull latest `core/transcriber.py` |
 | Playlist only processes one video | Use a pure `playlist?list=` URL, or enable expand for `watch?v=&list=`; each item still downloads with `noplaylist` |
@@ -607,7 +615,34 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 | `chat_sessions` | Ollama chat sessions per transcription |
 | `chat_messages` | Individual chat messages |
 
+## Backlog
+
+### Entregue em 2026-07-30 — endurecimento ASR para vídeos longos
+
+- [x] Dividir áudio acima de 10 minutos em intervalos próprios de 5 minutos.
+- [x] Adicionar 5 segundos de sobreposição e remover duplicações por timestamps/ownership.
+- [x] Preferir cortes próximos de silêncio e limitar loops consecutivos idênticos.
+- [x] Integrar Silero VAD do `whisper-cli`, com autodetecção do modelo GGML.
+- [x] Tornar `--max-context=0` e `--suppress-nst` proteções configuráveis.
+- [x] Comparar perfis de 30, 10 e 5 minutos no áudio conhecido por alucinar; detalhes em [docs/qa/YT-ASR-CHUNK-HOTFIX-QA-001.md](docs/qa/YT-ASR-CHUNK-HOTFIX-QA-001.md).
+- [x] Corrigir a migração automática das configurações legadas 60/30 para 10/5 minutos.
+
+### Próximas validações
+
+- [ ] Repetir o benchmark com outros vídeos conhecidos por alucinar e diferentes idiomas.
+- [ ] Medir qualidade/tempo com Whisper Small versus Medium na GTX 1050 Ti.
+- [ ] Ajustar limiar e duração máxima do VAD somente com evidência dos novos benchmarks.
+- [ ] Avaliar um fluxo na interface para baixar/verificar o Silero VAD canônico.
+
 ## Changelog
+
+### v3.5 — ASR anti-hallucination hardening
+
+- Long audio now starts chunking above 10 minutes into 5-minute owned intervals.
+- Five-second overlap, silence-aware boundaries, timestamp de-duplication, and exact-loop protection.
+- Optional Silero VAD, `--max-context=0`, and `--suppress-nst` integration for `whisper-cli`.
+- Legacy 60/30-minute settings migrate automatically to the hardened defaults.
+- Benchmark and QA evidence: [docs/qa/YT-ASR-CHUNK-HOTFIX-QA-001.md](docs/qa/YT-ASR-CHUNK-HOTFIX-QA-001.md).
 
 ### v3.4 — AI transcript improvement (Biblioteca)
 
@@ -647,7 +682,7 @@ Default path: `~/.youtube_transcriber/youtube_transcriber.db` (or portable `data
 
 ### v3.1 — Long audio, playlists, and local RAG
 
-- Long-audio chunking for Whisper (split above threshold; default >60 min into 30 min pieces) to reduce end-of-file hallucination loops.
+- Introduced long-audio chunking for Whisper; the original 60/30-minute defaults were superseded by the v3.5 anti-hallucination profile.
 - Playlist expansion into per-video jobs.
 - Optional long-term memory via `rag-sqlite` (index on save, chat context, scopes).
 

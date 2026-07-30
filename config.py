@@ -44,9 +44,17 @@ DEFAULT_SETTINGS = {
     "whisper_beam_size": "1",
     "whisper_best_of": "1",
     "whisper_use_gpu": "0",
-    # Long-audio anti-hallucination: split when longer than threshold into fixed chunks
-    "whisper_long_audio_threshold_seconds": "3600",  # > 60 minutes
-    "whisper_chunk_seconds": "1800",  # 30-minute pieces
+    # Long-audio anti-hallucination: short, overlapped, silence-aware chunks.
+    "whisper_long_audio_threshold_seconds": "600",  # > 10 minutes
+    "whisper_chunk_seconds": "300",  # 5-minute owned intervals
+    "whisper_chunk_overlap_seconds": "5",
+    "whisper_chunk_silence_search_seconds": "15",
+    "whisper_prefer_silence_chunks": "1",
+    # whisper.cpp decoder hardening. The worker auto-discovers a nearby Silero model.
+    "whisper_vad_enabled": "1",
+    "whisper_vad_model": "",
+    "whisper_max_context": "0",
+    "whisper_suppress_nst": "1",
     "theme": "Light (Custom)",
     "notifications_enabled": "1",
     "ollama_url": "http://localhost:11434",

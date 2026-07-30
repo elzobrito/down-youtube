@@ -194,6 +194,112 @@ class SettingsTab(ttk.Frame):
             "(sem troca automatica de modelo).",
         )
 
+        ttk.Label(transcription_frame, text="Dividir a partir de (min):").grid(
+            row=2, column=0, sticky=tk.W, pady=5
+        )
+        self.chunk_threshold_minutes_var = tk.StringVar(
+            value=self._minutes_setting("whisper_long_audio_threshold_seconds", 600)
+        )
+        ttk.Entry(
+            transcription_frame,
+            textvariable=self.chunk_threshold_minutes_var,
+            width=10,
+        ).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(transcription_frame, text="Tamanho do pedaço (min):").grid(
+            row=3, column=0, sticky=tk.W, pady=5
+        )
+        self.chunk_minutes_var = tk.StringVar(
+            value=self._minutes_setting("whisper_chunk_seconds", 300)
+        )
+        ttk.Entry(
+            transcription_frame,
+            textvariable=self.chunk_minutes_var,
+            width=10,
+        ).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(transcription_frame, text="Sobreposição (s):").grid(
+            row=4, column=0, sticky=tk.W, pady=5
+        )
+        self.chunk_overlap_var = tk.StringVar(
+            value=get_setting("whisper_chunk_overlap_seconds") or "5"
+        )
+        ttk.Entry(
+            transcription_frame,
+            textvariable=self.chunk_overlap_var,
+            width=10,
+        ).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+
+        self.prefer_silence_chunks_var = tk.BooleanVar(
+            value=get_setting("whisper_prefer_silence_chunks") != "0"
+        )
+        prefer_silence = ttk.Checkbutton(
+            transcription_frame,
+            text="Preferir cortes próximos de silêncio",
+            variable=self.prefer_silence_chunks_var,
+        )
+        prefer_silence.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=5)
+        ToolTip(
+            prefer_silence,
+            "Procura o trecho de menor energia nos 15 segundos anteriores "
+            "ao corte nominal, preservando a duração máxima configurada.",
+        )
+
+        self.vad_enabled_var = tk.BooleanVar(
+            value=get_setting("whisper_vad_enabled") != "0"
+        )
+        vad_check = ttk.Checkbutton(
+            transcription_frame,
+            text="Ativar VAD do whisper.cpp",
+            variable=self.vad_enabled_var,
+        )
+        vad_check.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=5)
+        ToolTip(
+            vad_check,
+            "Ignora regiões sem fala e limita blocos contínuos de voz. "
+            "Requer um modelo Silero VAD compatível.",
+        )
+
+        ttk.Label(transcription_frame, text="Modelo VAD:").grid(
+            row=7, column=0, sticky=tk.W, pady=5
+        )
+        self.vad_model_var = tk.StringVar(value=get_setting("whisper_vad_model") or "")
+        ttk.Entry(
+            transcription_frame,
+            textvariable=self.vad_model_var,
+            width=50,
+        ).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Button(
+            transcription_frame,
+            text="Arquivo...",
+            width=12,
+            command=lambda: self._browse_file(
+                self.vad_model_var,
+                [("Modelo VAD", "*.bin"), ("Todos", "*.*")],
+            ),
+        ).grid(row=7, column=2, pady=5)
+
+        ttk.Label(transcription_frame, text="Máx. contexto (-1=padrão, 0=sem):").grid(
+            row=8, column=0, sticky=tk.W, pady=5
+        )
+        self.max_context_var = tk.StringVar(
+            value=get_setting("whisper_max_context") or "0"
+        )
+        ttk.Entry(
+            transcription_frame,
+            textvariable=self.max_context_var,
+            width=10,
+        ).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
+
+        self.suppress_nst_var = tk.BooleanVar(
+            value=get_setting("whisper_suppress_nst") != "0"
+        )
+        ttk.Checkbutton(
+            transcription_frame,
+            text="Suprimir tokens sem fala (--suppress-nst)",
+            variable=self.suppress_nst_var,
+        ).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=5)
+
         performance_frame = ttk.LabelFrame(
             scrollable_frame,
             text="Performance",
@@ -486,6 +592,22 @@ class SettingsTab(ttk.Frame):
         if dirpath:
             self.output_dir_var.set(dirpath)
 
+    @staticmethod
+    def _minutes_setting(key, default_seconds):
+        try:
+            seconds = float(get_setting(key) or default_seconds)
+        except (TypeError, ValueError):
+            seconds = float(default_seconds)
+        legacy = {
+            "whisper_long_audio_threshold_seconds": (3600.0, 600.0),
+            "whisper_chunk_seconds": (1800.0, 300.0),
+        }
+        old_new = legacy.get(key)
+        if old_new and seconds == old_new[0]:
+            seconds = old_new[1]
+        minutes = seconds / 60.0
+        return str(int(minutes)) if minutes.is_integer() else f"{minutes:g}"
+
     def _change_theme(self, event=None):
         theme = self.theme_var.get()
         from gui.themes import THEME_DARK, THEME_LIGHT, apply_app_theme
@@ -565,6 +687,21 @@ class SettingsTab(ttk.Frame):
                 pass
 
     def _save_settings(self):
+        try:
+            threshold_seconds = int(float(self.chunk_threshold_minutes_var.get()) * 60)
+            chunk_seconds = int(float(self.chunk_minutes_var.get()) * 60)
+            overlap_seconds = int(float(self.chunk_overlap_var.get()))
+            max_context = int(self.max_context_var.get().strip() or "-1")
+            if threshold_seconds <= 0 or chunk_seconds <= 0:
+                raise ValueError("limite e tamanho devem ser positivos")
+            if overlap_seconds < 0 or overlap_seconds >= chunk_seconds:
+                raise ValueError("sobreposição deve ser menor que o pedaço")
+            if max_context < -1:
+                raise ValueError("máximo de contexto deve ser -1 ou maior")
+        except ValueError as exc:
+            messagebox.showerror("Configuração inválida", str(exc))
+            return
+
         set_setting("ffmpeg_path", self.ffmpeg_var.get())
         set_setting("whisper_cli", self.whisper_cli_var.get())
         set_setting("whisper_model", self.whisper_model_var.get())
@@ -574,6 +711,17 @@ class SettingsTab(ttk.Frame):
         asr_label = self.asr_preprocess_var.get()
         asr_value = ASR_PREPROCESS_UI.get(asr_label, "off")
         set_setting("asr_audio_preprocess", normalize_asr_preprocess_preset(asr_value))
+        set_setting("whisper_long_audio_threshold_seconds", str(threshold_seconds))
+        set_setting("whisper_chunk_seconds", str(chunk_seconds))
+        set_setting("whisper_chunk_overlap_seconds", str(overlap_seconds))
+        set_setting(
+            "whisper_prefer_silence_chunks",
+            "1" if self.prefer_silence_chunks_var.get() else "0",
+        )
+        set_setting("whisper_vad_enabled", "1" if self.vad_enabled_var.get() else "0")
+        set_setting("whisper_vad_model", self.vad_model_var.get().strip())
+        set_setting("whisper_max_context", str(max_context))
+        set_setting("whisper_suppress_nst", "1" if self.suppress_nst_var.get() else "0")
         set_setting("keep_audio", "1" if self.keep_audio_var.get() else "0")
         set_setting("keep_video", "1" if self.keep_video_var.get() else "0")
         set_setting(

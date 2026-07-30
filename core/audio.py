@@ -2,6 +2,7 @@ import hashlib
 import os
 import subprocess
 import wave
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -408,19 +409,37 @@ class AudioProcessor:
             start += chunk_seconds
         return ranges
 
-    def split_wav_into_chunks(self, audio_path, chunk_seconds, output_dir, prefix="chunk"):
+    def split_wav_into_chunks(
+        self,
+        audio_path,
+        chunk_seconds,
+        output_dir,
+        prefix="chunk",
+        overlap_seconds=0,
+        prefer_silence=False,
+        silence_search_seconds=15,
+    ):
         """
-        Split a WAV into temporary chunk WAV files of at most chunk_seconds.
+        Split a WAV into temporary chunk WAV files with optional overlap.
 
-        Returns list of dicts: {path, start, length, index}.
+        ``owned_start``/``owned_end`` describe the non-overlapping timeline
+        assigned to a chunk. ``start`` may be earlier because of overlap.
+        When requested, boundaries move backwards to the quietest short window
+        near the nominal cut without making the owned interval longer.
+
+        Returns dicts with path, start, length, index, owned_start, owned_end.
         Uses pure Python wave I/O (no ffmpeg) so unit tests need no FFmpeg.
         """
         audio_path = str(audio_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         chunk_seconds = float(chunk_seconds)
+        overlap_seconds = max(0.0, float(overlap_seconds or 0.0))
+        silence_search_seconds = max(0.0, float(silence_search_seconds or 0.0))
         if chunk_seconds <= 0:
             raise ValueError("chunk_seconds must be positive")
+        if overlap_seconds >= chunk_seconds:
+            raise ValueError("overlap_seconds must be smaller than chunk_seconds")
 
         chunks = []
         try:
@@ -429,20 +448,46 @@ class AudioProcessor:
                 nchannels = source.getnchannels()
                 sampwidth = source.getsampwidth()
                 total_frames = source.getnframes()
-                frames_per_chunk = max(1, int(round(rate * chunk_seconds)))
-
+                duration = total_frames / float(rate) if rate else 0.0
+                owned_start = 0.0
                 index = 0
-                frames_read = 0
-                while frames_read < total_frames:
-                    if self.progress_callback:
-                        # optional light status
-                        pass
-                    to_read = min(frames_per_chunk, total_frames - frames_read)
+
+                while owned_start < duration - 1e-9:
+                    nominal_end = min(duration, owned_start + chunk_seconds)
+                    owned_end = nominal_end
+                    if (
+                        prefer_silence
+                        and nominal_end < duration
+                        and sampwidth == 2
+                        and silence_search_seconds > 0
+                    ):
+                        search_start = max(
+                            owned_start + min(1.0, chunk_seconds / 4.0),
+                            nominal_end - silence_search_seconds,
+                        )
+                        quiet = self._quietest_boundary(
+                            source,
+                            rate=rate,
+                            channels=nchannels,
+                            start_seconds=search_start,
+                            end_seconds=nominal_end,
+                        )
+                        if quiet is not None and quiet > owned_start:
+                            owned_end = quiet
+
+                    physical_start = (
+                        owned_start
+                        if index == 0
+                        else max(0.0, owned_start - overlap_seconds)
+                    )
+                    start_frame = max(0, int(round(physical_start * rate)))
+                    end_frame = min(total_frames, int(round(owned_end * rate)))
+                    to_read = max(0, end_frame - start_frame)
+                    source.setpos(start_frame)
                     data = source.readframes(to_read)
                     if not data:
                         break
 
-                    start_sec = frames_read / float(rate) if rate else 0.0
                     length_sec = to_read / float(rate) if rate else 0.0
                     chunk_path = output_dir / f"{prefix}_{index:03d}.wav"
 
@@ -455,12 +500,14 @@ class AudioProcessor:
                     chunks.append(
                         {
                             "path": str(chunk_path),
-                            "start": start_sec,
+                            "start": physical_start,
                             "length": length_sec,
                             "index": index,
+                            "owned_start": owned_start,
+                            "owned_end": owned_end,
                         }
                     )
-                    frames_read += to_read
+                    owned_start = owned_end
                     index += 1
         except Exception as exc:
             self.last_error = str(exc)
@@ -473,6 +520,54 @@ class AudioProcessor:
             raise
 
         return chunks
+
+    @staticmethod
+    def _quietest_boundary(
+        source,
+        rate,
+        channels,
+        start_seconds,
+        end_seconds,
+        window_seconds=0.25,
+    ):
+        """Return the center of the lowest-energy 16-bit PCM window."""
+        if rate <= 0 or channels <= 0 or end_seconds <= start_seconds:
+            return None
+        start_frame = max(0, int(round(start_seconds * rate)))
+        end_frame = min(source.getnframes(), int(round(end_seconds * rate)))
+        if end_frame <= start_frame:
+            return None
+
+        original_pos = source.tell()
+        try:
+            source.setpos(start_frame)
+            samples = array("h", source.readframes(end_frame - start_frame))
+        finally:
+            source.setpos(original_pos)
+        if not samples:
+            return None
+
+        window_samples = max(channels, int(round(rate * channels * window_seconds)))
+        step = max(channels, window_samples // 2)
+        best_offset = None
+        best_energy = None
+        limit = max(1, len(samples) - window_samples + 1)
+        for offset in range(0, limit, step):
+            window = samples[offset : offset + window_samples]
+            if not window:
+                continue
+            energy = sum(abs(value) for value in window) / len(window)
+            if (
+                best_energy is None
+                or energy < best_energy
+                or (energy == best_energy and (best_offset is None or offset > best_offset))
+            ):
+                best_energy = energy
+                best_offset = offset
+        if best_offset is None:
+            return None
+        center_frames = (best_offset + window_samples / 2.0) / channels
+        return start_seconds + center_frames / rate
 
     @staticmethod
     def cleanup_chunk_artifacts(chunk_paths):

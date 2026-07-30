@@ -7,6 +7,7 @@ from pathlib import Path
 from config import get_config
 from database import (
     get_setting,
+    set_setting,
     get_latest_transcription_for_source,
     add_video,
     add_history,
@@ -530,9 +531,18 @@ class TranscriberWorker:
             progress_callback=self._update_progress,
             cancel_check_callback=lambda: self.cancel_requested,
             long_audio_threshold_seconds=cfg.get(
-                "whisper_long_audio_threshold_seconds", 3600
+                "whisper_long_audio_threshold_seconds", 600
             ),
-            chunk_seconds=cfg.get("whisper_chunk_seconds", 1800),
+            chunk_seconds=cfg.get("whisper_chunk_seconds", 300),
+            chunk_overlap_seconds=cfg.get("whisper_chunk_overlap_seconds", 5),
+            prefer_silence_chunks=cfg.get("whisper_prefer_silence_chunks", True),
+            silence_search_seconds=cfg.get(
+                "whisper_chunk_silence_search_seconds", 15
+            ),
+            vad_enabled=cfg.get("whisper_vad_enabled", False),
+            vad_model_path=cfg.get("whisper_vad_model", ""),
+            max_context=cfg.get("whisper_max_context", -1),
+            suppress_nst=cfg.get("whisper_suppress_nst", False),
             ffmpeg_path=cfg.get("ffmpeg_path") or "ffmpeg",
         )
         
@@ -669,6 +679,31 @@ class TranscriberWorker:
             if fallback_cookies.exists():
                 cookies_path = fallback_cookies
 
+        chunk_threshold = self._get_int_setting(
+            "whisper_long_audio_threshold_seconds", 600
+        )
+        chunk_seconds = self._get_int_setting("whisper_chunk_seconds", 300)
+        if chunk_threshold == 3600 and chunk_seconds == 1800:
+            # One-time compatibility migration from the original mitigation.
+            chunk_threshold, chunk_seconds = 600, 300
+            set_setting("whisper_long_audio_threshold_seconds", "600")
+            set_setting("whisper_chunk_seconds", "300")
+            set_setting("whisper_vad_enabled", "1")
+            set_setting("whisper_max_context", "0")
+            set_setting("whisper_suppress_nst", "1")
+            self.log(
+                "ℹ️ Chunking Whisper atualizado: threshold 10 min, pedaços 5 min, "
+                "contexto zerado e tokens sem fala suprimidos."
+            )
+
+        vad_model = self._resolve_vad_model(
+            get_setting("whisper_vad_model") or "",
+            whisper_model=get_setting("whisper_model") or "",
+        )
+        if vad_model and not get_setting("whisper_vad_model"):
+            set_setting("whisper_vad_model", vad_model)
+            self.log(f"ℹ️ Modelo VAD detectado: {vad_model}")
+
         return {
             "ffmpeg_path": get_setting("ffmpeg_path"),
             "whisper_cli": get_setting("whisper_cli"),
@@ -683,10 +718,22 @@ class TranscriberWorker:
             "whisper_beam_size": self._get_int_setting("whisper_beam_size", 1),
             "whisper_best_of": self._get_int_setting("whisper_best_of", 1),
             "whisper_use_gpu": get_setting("whisper_use_gpu") == "1",
-            "whisper_long_audio_threshold_seconds": self._get_int_setting(
-                "whisper_long_audio_threshold_seconds", 3600
+            "whisper_long_audio_threshold_seconds": chunk_threshold,
+            "whisper_chunk_seconds": chunk_seconds,
+            "whisper_chunk_overlap_seconds": self._get_int_setting(
+                "whisper_chunk_overlap_seconds", 5
             ),
-            "whisper_chunk_seconds": self._get_int_setting("whisper_chunk_seconds", 1800),
+            "whisper_chunk_silence_search_seconds": self._get_int_setting(
+                "whisper_chunk_silence_search_seconds", 15
+            ),
+            "whisper_prefer_silence_chunks": get_setting(
+                "whisper_prefer_silence_chunks"
+            )
+            != "0",
+            "whisper_vad_enabled": get_setting("whisper_vad_enabled") != "0",
+            "whisper_vad_model": vad_model,
+            "whisper_max_context": self._get_int_setting("whisper_max_context", 0),
+            "whisper_suppress_nst": get_setting("whisper_suppress_nst") != "0",
             "use_streaming_pipeline": get_setting("use_streaming_pipeline") == "1",
             "cookies_path": str(cookies_path) if cookies_path else None,
             "asr_audio_preprocess": self._resolve_asr_preprocess_preset(),
@@ -703,6 +750,30 @@ class TranscriberWorker:
                 f"⚠️ asr_audio_preprocess legado/inválido '{raw}' → normalizado para '{normalized}'"
             )
         return normalized
+
+    @staticmethod
+    def _resolve_vad_model(configured, whisper_model=""):
+        configured_path = Path(str(configured or "")).expanduser()
+        if configured and configured_path.is_file():
+            return str(configured_path.resolve())
+
+        model_path = Path(str(whisper_model or "")).expanduser()
+        search_dirs = []
+        if whisper_model:
+            search_dirs.append(model_path.parent)
+        patterns = (
+            "ggml-silero*.bin",
+            "silero*-ggml.bin",
+            "for-tests-silero*-ggml.bin",
+        )
+        for directory in search_dirs:
+            if not directory.is_dir():
+                continue
+            for pattern in patterns:
+                matches = sorted(directory.glob(pattern))
+                if matches:
+                    return str(matches[0].resolve())
+        return ""
 
     def _get_int_setting(self, key, default):
         try:

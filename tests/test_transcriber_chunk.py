@@ -1,12 +1,19 @@
 """Tests for long-audio chunking (anti-hallucination) in Whisper transcription."""
 
 import wave
+from array import array
 from pathlib import Path
 
 import pytest
 
 from core.audio import AudioProcessor
 from core.transcriber import Transcriber
+from core.transcriber import (
+    DEFAULT_CHUNK_OVERLAP_SECONDS,
+    DEFAULT_CHUNK_SECONDS,
+    DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS,
+)
+from core.worker import TranscriberWorker
 
 
 def _write_silent_wav(path, duration_sec, sample_rate=16000):
@@ -26,6 +33,9 @@ def test_should_chunk_threshold_boundary():
     assert AudioProcessor.should_chunk_duration(7200, 3600) is True
     assert AudioProcessor.should_chunk_duration(None, 3600) is False
     assert AudioProcessor.should_chunk_duration(100, 3600) is False
+    assert DEFAULT_LONG_AUDIO_THRESHOLD_SECONDS == 600
+    assert DEFAULT_CHUNK_SECONDS == 300
+    assert DEFAULT_CHUNK_OVERLAP_SECONDS == 5
 
 
 def test_compute_chunk_ranges_covers_duration():
@@ -60,6 +70,52 @@ def test_split_wav_into_chunks_and_cleanup(tmp_path):
     for item in chunks:
         assert not Path(item["path"]).exists()
     assert not side.exists()
+
+
+def test_split_chunks_include_overlap_and_owned_timeline(tmp_path):
+    wav = _write_silent_wav(tmp_path / "overlap.wav", duration_sec=5.0)
+    chunks = AudioProcessor().split_wav_into_chunks(
+        str(wav),
+        chunk_seconds=2.0,
+        overlap_seconds=0.5,
+        output_dir=tmp_path / "parts",
+    )
+    assert [(c["owned_start"], c["owned_end"]) for c in chunks] == [
+        (0.0, 2.0),
+        (2.0, 4.0),
+        (4.0, 5.0),
+    ]
+    assert chunks[0]["start"] == pytest.approx(0.0)
+    assert chunks[1]["start"] == pytest.approx(1.5)
+    assert chunks[2]["start"] == pytest.approx(3.5)
+    assert chunks[1]["length"] == pytest.approx(2.5)
+
+
+def test_silence_aware_cut_moves_boundary_backwards(tmp_path):
+    rate = 16000
+    samples = array("h")
+    for index in range(rate * 4):
+        second = index / rate
+        samples.append(0 if 1.45 <= second <= 1.70 else 9000)
+    wav = tmp_path / "silence-boundary.wav"
+    with wave.open(str(wav), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+
+    chunks = AudioProcessor().split_wav_into_chunks(
+        str(wav),
+        chunk_seconds=2.0,
+        overlap_seconds=0.25,
+        prefer_silence=True,
+        silence_search_seconds=1.0,
+        output_dir=tmp_path / "parts",
+    )
+    assert 1.45 <= chunks[0]["owned_end"] <= 1.70
+    assert chunks[1]["start"] == pytest.approx(
+        chunks[0]["owned_end"] - 0.25, abs=0.02
+    )
 
 
 def test_shift_srt_offsets_timestamps():
@@ -113,6 +169,7 @@ def test_transcribe_short_audio_does_not_split(monkeypatch, tmp_path):
     t = Transcriber(
         long_audio_threshold_seconds=3600,
         chunk_seconds=1800,
+        chunk_overlap_seconds=0,
     )
     result = t.transcribe(str(wav), output_dir=str(tmp_path), duration=2.0)
     assert result is not None
@@ -146,6 +203,8 @@ def test_transcribe_long_audio_splits_merges_and_cleans(monkeypatch, tmp_path):
     t = Transcriber(
         long_audio_threshold_seconds=3,
         chunk_seconds=2,
+        chunk_overlap_seconds=0,
+        prefer_silence_chunks=False,
         progress_callback=lambda d: progress_events.append(d),
     )
     result = t.transcribe(str(wav), output_dir=str(tmp_path), duration=5.0)
@@ -210,6 +269,7 @@ def test_chunk_progress_wrapper_does_not_recurse(monkeypatch, tmp_path):
     t = Transcriber(
         long_audio_threshold_seconds=3,
         chunk_seconds=2,
+        chunk_overlap_seconds=0,
         progress_callback=outer_progress,
     )
     result = t.transcribe(str(wav), output_dir=str(tmp_path), duration=5.0)
@@ -241,9 +301,140 @@ def test_transcribe_chunked_respects_cancel(monkeypatch, tmp_path):
     t = Transcriber(
         long_audio_threshold_seconds=3,
         chunk_seconds=2,
+        chunk_overlap_seconds=0,
         cancel_check_callback=cancel,
     )
     result = t.transcribe(str(wav), output_dir=str(tmp_path), duration=5.0)
     assert result is None
     assert t.last_error == "Processamento cancelado"
     assert list(tmp_path.glob("**/long_part_*.wav")) == []
+
+
+def test_timestamp_merge_drops_overlap_duplicate():
+    transcriber = Transcriber(chunk_overlap_seconds=5)
+    existing = [{"start": 294.0, "end": 300.0, "text": "frase da fronteira"}]
+    incoming = [
+        {"start": 296.0, "end": 301.0, "text": "frase da fronteira"},
+        {"start": 301.0, "end": 304.0, "text": "conteúdo novo"},
+    ]
+    merged = transcriber._merge_timestamped_segments(
+        existing, incoming, owned_start=300.0
+    )
+    assert [segment["text"] for segment in merged] == [
+        "frase da fronteira",
+        "conteúdo novo",
+    ]
+
+
+def test_timestamp_merge_caps_exact_consecutive_loop_at_two():
+    transcriber = Transcriber(chunk_overlap_seconds=5)
+    incoming = [
+        {"start": index * 2.0, "end": index * 2.0 + 2.0, "text": "loop exato"}
+        for index in range(20)
+    ]
+    merged = transcriber._merge_timestamped_segments(
+        [], incoming, owned_start=0.0
+    )
+    assert len(merged) == 2
+    assert transcriber.last_suppressed_repeat_segments == 18
+
+
+def test_text_fallback_drops_word_overlap():
+    merged = Transcriber._merge_text_overlap(
+        "um dois três quatro",
+        "três quatro cinco seis",
+    )
+    assert merged == "um dois três quatro\ncinco seis"
+
+
+def test_whisper_hardening_options_are_added_when_supported(monkeypatch, tmp_path):
+    wav = _write_silent_wav(tmp_path / "short.wav", duration_sec=1.0)
+    vad_model = tmp_path / "vad.bin"
+    vad_model.write_bytes(b"vad")
+    captured = {}
+
+    class FakeProcess:
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+        def terminate(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        Path(str(wav) + ".txt").write_text("ok", encoding="utf-8")
+        Path(str(wav) + ".srt").write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\nok\n",
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr("core.transcriber.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(Transcriber, "_cli_supports_option", lambda self, option: True)
+    transcriber = Transcriber(
+        max_context=0,
+        suppress_nst=True,
+        vad_enabled=True,
+        vad_model_path=str(vad_model),
+    )
+    result = transcriber._transcribe_single(str(wav), str(tmp_path), duration=1.0)
+    assert result
+    command = captured["command"]
+    assert ["--max-context", "0"] == command[
+        command.index("--max-context") : command.index("--max-context") + 2
+    ]
+    assert "--suppress-nst" in command
+    assert "--vad" in command
+    assert ["--vad-model", str(vad_model)] == command[
+        command.index("--vad-model") : command.index("--vad-model") + 2
+    ]
+
+
+def test_vad_model_auto_discovery_prefers_production_name(tmp_path):
+    whisper_model = tmp_path / "ggml-small.bin"
+    whisper_model.write_bytes(b"whisper")
+    test_vad = tmp_path / "for-tests-silero-v6.2.0-ggml.bin"
+    test_vad.write_bytes(b"test")
+    production_vad = tmp_path / "ggml-silero-v6.2.0.bin"
+    production_vad.write_bytes(b"production")
+    assert TranscriberWorker._resolve_vad_model(
+        "", whisper_model=str(whisper_model)
+    ) == str(production_vad.resolve())
+
+
+def test_vad_model_auto_discovery_honors_configured_path(tmp_path):
+    configured = tmp_path / "custom-vad.bin"
+    configured.write_bytes(b"custom")
+    assert TranscriberWorker._resolve_vad_model(
+        str(configured), whisper_model=""
+    ) == str(configured.resolve())
+
+
+def test_worker_migrates_legacy_chunk_settings_without_name_error(monkeypatch):
+    settings = {
+        "whisper_long_audio_threshold_seconds": "3600",
+        "whisper_chunk_seconds": "1800",
+    }
+    writes = {}
+
+    monkeypatch.setattr("core.worker.get_setting", lambda key: settings.get(key))
+    monkeypatch.setattr(
+        "core.worker.set_setting",
+        lambda key, value: writes.__setitem__(key, value),
+    )
+    worker = TranscriberWorker(lambda message: None, lambda progress: None, lambda: None)
+
+    config = worker._get_current_config()
+
+    assert config["whisper_long_audio_threshold_seconds"] == 600
+    assert config["whisper_chunk_seconds"] == 300
+    assert writes == {
+        "whisper_long_audio_threshold_seconds": "600",
+        "whisper_chunk_seconds": "300",
+        "whisper_vad_enabled": "1",
+        "whisper_max_context": "0",
+        "whisper_suppress_nst": "1",
+    }
